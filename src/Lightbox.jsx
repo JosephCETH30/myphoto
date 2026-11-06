@@ -4,6 +4,7 @@ import { url, srcSet, downloadUrl, imgFallback } from './imgix.js'
 import Magnet from './Magnet.jsx'
 import { askDownload, downloadFile } from './Consent.jsx'
 import { CONTROLS, GROUPS, ZERO } from './controls.js'
+import Slider from './Slider.jsx'
 
 const AdjustCanvas = lazy(() => import('./Editor.jsx'))
 
@@ -103,6 +104,7 @@ export default function Lightbox({ photos, index, setIndex }) {
   const [panel, setPanel] = useState(null) // 'adjust' | null
   const [vals, setVals] = useState(ZERO)
   const [before, setBefore] = useState(false)
+  const [ctl, setCtl] = useState('exposure') // mobile: the one control being edited
   const [glReady, setGlReady] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -367,7 +369,7 @@ export default function Lightbox({ photos, index, setIndex }) {
           initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.35 }}
         >
           {/* Left sidebar (desktop) / top bar (mobile) */}
-          <nav className="relative z-10 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-paper/10 px-3 lg:h-auto lg:w-20 lg:flex-col lg:justify-start lg:border-r lg:border-b-0 lg:px-0 lg:py-gut">
+          <nav className="relative z-10 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-paper/10 px-3 pt-[env(safe-area-inset-top)] lg:h-auto lg:w-20 lg:flex-col lg:justify-start lg:border-r lg:border-b-0 lg:px-0 lg:py-gut">
             <Magnet look="accent" strength={0.3} className="size-11" onClick={close} aria-label="Close">
               <Icon d={I.close} className="size-4" />
             </Magnet>
@@ -439,7 +441,7 @@ export default function Lightbox({ photos, index, setIndex }) {
               <motion.aside
                 key={cropping ? 'crop' : 'adjust'}
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}
-                className="max-h-[40svh] shrink-0 overflow-y-auto border-t border-paper/10 px-gut py-4 lg:max-h-none lg:w-72 lg:border-t-0 lg:border-l lg:py-gut"
+                className="shrink-0 overflow-y-auto border-t border-paper/10 px-gut py-4 lg:max-h-none lg:w-72 lg:border-t-0 lg:border-l lg:py-gut"
               >
                 {cropping ? (
                   <>
@@ -466,23 +468,44 @@ export default function Lightbox({ photos, index, setIndex }) {
                         <button className={`${label} text-dim transition-colors hover:text-paper disabled:opacity-30`} disabled={!adjusted} onClick={() => setVals(ZERO)}>Reset</button>
                       </div>
                     </div>
-                    {GROUPS.map((g) => (
-                      <section key={g} className="mt-5 border-t border-paper/10 pt-4 first:border-t-0 first:pt-1">
-                        <p className="mb-1 text-[10px] uppercase tracking-[.25em] text-paper">{g}</p>
-                        {CONTROLS.filter((x) => x[2] === g).map(([key, name, , min = -100]) => (
-                          <label key={key} className="block py-1.5" onDoubleClick={() => setVals((x) => ({ ...x, [key]: 0 }))}>
-                            <span className={`flex justify-between ${label} text-dim`}>
-                              <span>{name}</span>
-                              <span className="text-paper tabular-nums">{vals[key] > 0 && min < 0 ? '+' : ''}{vals[key]}</span>
-                            </span>
-                            <input
-                              type="range" min={min} max="100" step="1" value={vals[key]} className="slider"
-                              onChange={(e) => setVals((x) => ({ ...x, [key]: +e.target.value }))}
-                            />
-                          </label>
-                        ))}
-                      </section>
-                    ))}
+                    {/* Mobile: pick a control from the chips, edit it with one big slider */}
+                    {(() => {
+                      const [key, name, , min = -100] = CONTROLS.find((x) => x[0] === ctl)
+                      return (
+                        <div className="lg:hidden">
+                          <div className="mt-3 flex items-baseline justify-between">
+                            <span className={`${label} text-paper`}>{name}</span>
+                            <span className="text-sm text-paper tabular-nums">{vals[key] > 0 && min < 0 ? '+' : ''}{vals[key]}</span>
+                          </div>
+                          <Slider big label={name} min={min} value={vals[key]} onChange={(n) => setVals((x) => ({ ...x, [key]: n }))} />
+                          <div className="-mx-gut flex gap-2 overflow-x-auto px-gut pt-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                            {CONTROLS.map(([k2, n2]) => (
+                              <button key={k2} onClick={() => setCtl(k2)} className={`relative shrink-0 ${chip(ctl === k2)}`}>
+                                {n2}
+                                {vals[k2] !== 0 && <span className={`absolute -top-0.5 -right-0.5 size-2 rounded-full ${ctl === k2 ? 'bg-accent' : 'bg-paper'}`} />}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })()}
+                    {/* Desktop: everything, grouped */}
+                    <div className="hidden lg:block">
+                      {GROUPS.map((g) => (
+                        <section key={g} className="mt-5 border-t border-paper/10 pt-4 first:border-t-0 first:pt-1">
+                          <p className="mb-1 text-[10px] uppercase tracking-[.25em] text-paper">{g}</p>
+                          {CONTROLS.filter((x) => x[2] === g).map(([key, name, , min = -100]) => (
+                            <div key={key} className="py-1">
+                              <span className={`flex justify-between ${label} text-dim`}>
+                                <span>{name}</span>
+                                <span className="text-paper tabular-nums">{vals[key] > 0 && min < 0 ? '+' : ''}{vals[key]}</span>
+                              </span>
+                              <Slider label={name} min={min} value={vals[key]} onChange={(n) => setVals((x) => ({ ...x, [key]: n }))} />
+                            </div>
+                          ))}
+                        </section>
+                      ))}
+                    </div>
                     {!glReady && <p className={`mt-2 ${label} text-dim`}>Loading full resolution…</p>}
                   </>
                 )}
@@ -491,7 +514,7 @@ export default function Lightbox({ photos, index, setIndex }) {
           </AnimatePresence>
 
           {/* Tool rail: right (desktop) / bottom (mobile) */}
-          <div className="relative z-10 flex h-16 shrink-0 items-center justify-center gap-2 border-t border-paper/10 px-3 lg:h-auto lg:w-20 lg:flex-col lg:justify-between lg:border-t-0 lg:border-l lg:px-0 lg:py-gut">
+          <div className="relative z-10 flex shrink-0 items-center justify-center gap-2 border-t border-paper/10 px-3 pt-2 pb-[max(.75rem,env(safe-area-inset-bottom))] lg:h-auto lg:w-20 lg:flex-col lg:justify-between lg:border-t-0 lg:border-l lg:px-0 lg:py-gut">
             {/* Desktop: save sits at the top, level with Close on the left */}
             <SaveButton className="max-lg:hidden" onClick={saveAndDownload} disabled={saveDisabled} saving={saving} />
             <div className="contents lg:flex lg:flex-col lg:items-center lg:gap-2">

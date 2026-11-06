@@ -14,6 +14,7 @@
   html { scroll-behavior: smooth; }
   body { @apply bg-ink text-paper font-sans antialiased overflow-x-hidden; }
   a[href], button:not(:disabled), [role='button'] { cursor: pointer; }
+  button, a, [role='slider'] { touch-action: manipulation; } /* no iOS double-tap zoom / tap delay */
   img, canvas { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; } /* no iOS long-press save */
   ::selection { @apply bg-paper text-ink; }
   :focus-visible { @apply outline outline-1 outline-offset-4 outline-paper; }
@@ -21,13 +22,4 @@
     html { scroll-behavior: auto; }
     *, *::before, *::after { transition: none !important; animation: none !important; }
   }
-}
-
-/* Minimal range slider: 1px track, small white thumb */
-@layer components {
-  .slider { appearance: none; background: transparent; height: 22px; width: 100%; cursor: pointer; }
-  .slider::-webkit-slider-runnable-track { height: 1px; background: rgb(255 255 255 / .25); }
-  .slider::-webkit-slider-thumb { appearance: none; width: 13px; height: 13px; margin-top: -6px; border-radius: 50%; background: #fff; }
-  .slider::-moz-range-track { height: 1px; background: rgb(255 255 255 / .25); }
-  .slider::-moz-range-thumb { width: 13px; height: 13px; border: 0; border-radius: 50%; background: #fff; }
 }
