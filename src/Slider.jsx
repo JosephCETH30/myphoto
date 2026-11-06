@@ -1,5 +1,7 @@
 import { useRef } from 'react'
 
+// Pointer capture can throw on iOS (e.g. pointer already gone); dragging must keep working without it.
+const capture = (el, e) => { try { el.setPointerCapture(e.pointerId) } catch { /* ignore */ } }
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v))
 
 // Touch-friendly slider.
@@ -17,7 +19,7 @@ export default function Slider({ value, onChange, min = -100, max = 100, label, 
   }
   const down = (e) => {
     if (e.button > 0) return
-    e.currentTarget.setPointerCapture(e.pointerId)
+    capture(e.currentTarget, e)
     const mouse = e.pointerType === 'mouse'
     g.current = { x: e.clientX, y: e.clientY, v0: value, mouse, dragging: mouse, w: track.current.getBoundingClientRect().width }
     if (mouse) onChange(at(e.clientX))

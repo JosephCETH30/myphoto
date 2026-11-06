@@ -14,6 +14,8 @@ const MIN = 0.05
 const ASPECTS = [['Free', 0], ['Original', -1], ['1:1', 1], ['4:5', 4 / 5], ['3:2', 3 / 2], ['16:9', 16 / 9], ['9:16', 9 / 16]]
 const EASE = 'cubic-bezier(.2,.7,.2,1)'
 const SIZE_T = `width .45s ${EASE}, height .45s ${EASE}`
+// Pointer capture can throw on iOS (e.g. pointer already gone); dragging must keep working without it.
+const capture = (el, e) => { try { el.setPointerCapture(e.pointerId) } catch { /* ignore */ } }
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v))
 const pad = (x) => String(x).padStart(2, '0')
 const isFull = (c) => c.x < 0.001 && c.y < 0.001 && c.w > 0.999 && c.h > 0.999
@@ -183,6 +185,12 @@ export default function Lightbox({ photos, index, setIndex }) {
     paint()
   })
 
+  // Photo size from the first <img>. Cached images can finish before React attaches onLoad (WebKit/iOS),
+  // so also read it straight away when the element mounts.
+  const measure = (img) => {
+    if (img?.complete && img.naturalWidth) setNat((n) => n || { w: img.naturalWidth, h: img.naturalHeight })
+  }
+
   const go = (d) => { if (cropping || n < 2) return; setIndex((index + d + n) % n) }
   const rotate = () => {
     setR((x) => x + 90); setCrop(rotCrop); setDraft(rotCrop); setAspect(0); fit()
@@ -264,7 +272,7 @@ export default function Lightbox({ photos, index, setIndex }) {
   }
   const onDown = (e) => {
     if (cropping || e.button > 0) return
-    stage.current.setPointerCapture(e.pointerId)
+    capture(stage.current, e)
     pts.current.set(e.pointerId, rel(e))
     begin()
   }
@@ -316,7 +324,7 @@ export default function Lightbox({ photos, index, setIndex }) {
   const cd = useRef(null)
   const grab = (mode) => (e) => {
     e.stopPropagation()
-    e.currentTarget.setPointerCapture(e.pointerId)
+    capture(e.currentTarget, e)
     cd.current = { mode, sx: e.clientX, sy: e.clientY, s: draft }
   }
   const drag = (e) => {
@@ -365,7 +373,7 @@ export default function Lightbox({ photos, index, setIndex }) {
     <AnimatePresence onExitComplete={() => setIndex(-1)}>
       {show && (
         <motion.div
-          className="fixed inset-0 z-50 flex flex-col bg-ink outline-none lg:flex-row" tabIndex={-1} autoFocus role="dialog" aria-modal="true" aria-label="Photo viewer"
+          className="fixed inset-x-0 top-0 z-50 flex h-dvh flex-col bg-ink outline-none lg:flex-row" tabIndex={-1} autoFocus role="dialog" aria-modal="true" aria-label="Photo viewer"
           initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.35 }}
         >
           {/* Left sidebar (desktop) / top bar (mobile) */}
@@ -390,7 +398,7 @@ export default function Lightbox({ photos, index, setIndex }) {
             <motion.div key={p.src} className="absolute inset-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}>
               {!nat ? (
                 <img {...imgProps} sizes="100vw" className="absolute object-contain" style={{ left: PAD, top: TOP, width: Math.max(0, box.W - 2 * PAD), height: Math.max(0, AH) }}
-                  onLoad={(e) => setNat({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })} />
+                  onLoad={(e) => measure(e.currentTarget)} ref={measure} />
               ) : (
                 <div ref={viewEl} className="absolute top-1/2 left-1/2 overflow-hidden" style={{ width: VW, height: VH }}>
                   <div className="absolute" style={{ left: -c.x * RW * k, top: -c.y * RH * k, width: RW * k, height: RH * k, transition: t(['left', 'top', 'width', 'height']) }}>
