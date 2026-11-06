@@ -1,0 +1,3 @@
+Drop your .jpg / .jpeg / .png / .webp / .avif files in this folder.
+They appear on the site sorted by filename (rename to 01-..., 02-... to set order).
+The first one is the big hero photo.
