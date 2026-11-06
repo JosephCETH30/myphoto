@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
-import { url, srcSet, downloadUrl } from './imgix.js'
+import { url, srcSet, downloadUrl, imgFallback } from './imgix.js'
 import { askDownload, downloadFile } from './Consent.jsx'
 
 gsap.registerPlugin(ScrollTrigger)
@@ -39,12 +39,12 @@ export default function Gallery({ photos, onOpen }) {
             <figure key={p.src} className="shot group relative mb-gut break-inside-avoid">
               <button className="block w-full cursor-pointer overflow-hidden" onClick={() => onOpen(i)} aria-label={`Open ${p.title || `photo ${i + 1}`}`}>
                 <img
-                  src={url(p.src, { auto: 'format,compress', w: 700, q: 72 })}
+                  src={url(p.src, { auto: 'format', w: 700, q: 72 })}
                   srcSet={srcSet(p.src)}
                   sizes="(max-width: 600px) 100vw, (max-width: 1100px) 50vw, 33vw"
                   width={p.w} height={p.h}
                   loading={i < 3 ? 'eager' : 'lazy'}
-                  decoding="async"
+                  decoding="async" onError={imgFallback}
                   alt={p.title || `Photograph ${i + 1}`}
                   className="h-auto min-h-[120px] w-full transition-[transform,opacity] duration-700 ease-out group-hover:scale-[1.02]"
                 />

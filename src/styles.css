@@ -13,6 +13,7 @@
   html { scroll-behavior: smooth; }
   body { @apply bg-ink text-paper font-sans antialiased overflow-x-hidden; }
   a[href], button:not(:disabled), [role='button'] { cursor: pointer; }
+  img, canvas { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; } /* no iOS long-press save */
   ::selection { @apply bg-paper text-ink; }
   :focus-visible { @apply outline outline-1 outline-offset-4 outline-paper; }
   @media (prefers-reduced-motion: reduce) {

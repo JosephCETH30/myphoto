@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { url, srcSet, downloadUrl } from './imgix.js'
+import { url, srcSet, downloadUrl, imgFallback } from './imgix.js'
 import Magnet from './Magnet.jsx'
 import { askDownload, downloadFile } from './Consent.jsx'
 
@@ -34,7 +34,7 @@ export default function Lightbox({ photos, index, setIndex }) {
     addEventListener('keydown', key)
     document.documentElement.style.overflow = 'hidden'
     // Warm the neighbours so arrowing feels instant.
-    for (const d of [1, -1]) new Image().src = url(photos[(index + d + n) % n].src, { auto: 'format,compress', w: 2400, q: 85 })
+    for (const d of [1, -1]) new Image().src = url(photos[(index + d + n) % n].src, { auto: 'format', w: 2400, q: 85 })
     return () => { removeEventListener('keydown', key); document.documentElement.style.overflow = '' }
   })
 
@@ -56,10 +56,10 @@ export default function Lightbox({ photos, index, setIndex }) {
                     key={p.src}
                     custom={dir} variants={variants} initial="enter" animate="center" exit="exit"
                     transition={{ duration: 0.5, ease: [0.2, 0.7, 0.2, 1] }}
-                    src={url(p.src, { auto: 'format,compress', w: 2400, q: 85 })}
+                    src={url(p.src, { auto: 'format', w: 2400, q: 85 })}
                     srcSet={srcSet(p.src, [1200, 2000, 2800, 3600])}
                     sizes="100vw"
-                    draggable={false}
+                    draggable={false} onError={imgFallback}
                     className="size-full cursor-pointer touch-pan-y object-contain select-none"
                     alt={p.title || `Photograph ${index + 1}`}
                     drag={n > 1 ? 'x' : false} dragConstraints={{ left: 0, right: 0 }} dragElastic={0.6}

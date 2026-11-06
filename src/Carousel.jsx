@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { url, srcSet, downloadUrl } from './imgix.js'
+import { url, srcSet, downloadUrl, imgFallback } from './imgix.js'
 import Magnet from './Magnet.jsx'
 import { askDownload, downloadFile } from './Consent.jsx'
 
-const big = (src) => url(src, { auto: 'format,compress', w: 2000, q: 80 })
+const big = (src) => url(src, { auto: 'format', w: 2000, q: 80 })
 const pad = (x) => String(x).padStart(2, '0')
 
 const Arrow = ({ flip }) => (
@@ -88,7 +88,7 @@ export default function Carousel({ photos, onOpen }) {
               <img
                 key={p.src} className="absolute inset-0 size-full object-contain"
                 src={big(p.src)} srcSet={srcSet(p.src)} sizes="100vw"
-                alt={p.title || `Photograph ${i + 1}`} fetchPriority="high" draggable={false}
+                alt={p.title || `Photograph ${i + 1}`} fetchPriority="high" draggable={false} onError={imgFallback}
               />
             )}
             <canvas ref={canvas} aria-hidden="true" className={`absolute inset-0 size-full transition-opacity duration-500 ${gl ? 'opacity-100' : 'opacity-0'}`} />

@@ -81,7 +81,7 @@ export default function Consent() {
         <div className="overflow-y-auto px-6 pt-6 pb-2 sm:px-10 sm:pt-10">
           {photo && (
             <div data-in className="mb-8 flex items-center gap-4 pr-10">
-              <img src={url(photo.src, { auto: 'format,compress', w: 160, h: 160, fit: 'crop' })} alt="" className="size-14 shrink-0 object-cover" />
+              <img src={url(photo.src, { auto: 'format', w: 160, h: 160, fit: 'crop' })} alt="" className="size-14 shrink-0 object-cover" />
               <div className="min-w-0">
                 <p className={`${label} text-dim`}>{photo.edited ? 'Your edit of' : 'Downloading'}</p>
                 <p className="mt-1 truncate text-sm text-paper">{name}</p>
