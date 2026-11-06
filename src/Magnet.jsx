@@ -5,6 +5,7 @@ import gsap from 'gsap'
 const LOOK = {
   outline: ['border-paper/25 group-hover:border-paper group-hover:bg-paper', 'text-paper group-hover:text-ink'],
   solid: ['border-transparent bg-paper group-hover:bg-ink group-hover:border-paper/40', 'text-ink group-hover:text-paper'],
+  accent: ['border-transparent bg-accent group-hover:brightness-110', 'text-white'],
 }
 
 export default function Magnet({ children, className = '', strength = 0.35, look = 'outline', ...props }) {

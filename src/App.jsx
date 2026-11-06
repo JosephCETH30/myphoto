@@ -20,7 +20,7 @@ export default function App() {
 
   return (
     <>
-      <h1 className="sr-only">Yoseph Rafael — Photography</h1>
+      <h1 className="sr-only">Yoseph Photos</h1>
       <header className="fixed inset-x-0 top-0 z-10 flex h-14 items-center justify-between px-gut text-[11px] uppercase tracking-[.2em] mix-blend-difference">
         <span>Yoseph Rafael</span>
         <nav className="flex gap-5" aria-label="View">

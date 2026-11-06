@@ -4,6 +4,7 @@
   --color-ink: #000;
   --color-paper: #fff;
   --color-dim: #777;
+  --color-accent: #e10600;
   --font-sans: "Golos Text Variable", "Golos Text", system-ui, -apple-system, Arial, sans-serif;
   --spacing-gut: clamp(12px, 2vw, 28px);
 }
