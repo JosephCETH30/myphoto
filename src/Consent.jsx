@@ -65,7 +65,7 @@ export default function Consent() {
   if (!req) return null
   const { fn, photo } = req
   const name = photo?.src.split('/').pop()
-  const label = 'text-[11px] uppercase tracking-[.2em]'
+  const label = 'text-[13px] font-medium'
 
   return (
     <div className="fixed inset-0 z-[60] flex items-end justify-center sm:items-center sm:p-gut" role="dialog" aria-modal="true" aria-labelledby="license-title">
@@ -83,7 +83,7 @@ export default function Consent() {
             <div data-in className="mb-8 flex items-center gap-4 pr-10">
               <img src={url(photo.src, { auto: 'format', w: 160, h: 160, fit: 'crop' })} alt="" className="size-14 shrink-0 object-cover" />
               <div className="min-w-0">
-                <p className={`${label} text-dim`}>{photo.edited ? 'Your edit of' : 'Downloading'}</p>
+                <p className="text-[13px] text-paper/55">{photo.edited ? 'Your edit of' : 'Downloading'}</p>
                 <p className="mt-1 truncate text-sm text-paper">{name}</p>
               </div>
             </div>
@@ -129,14 +129,14 @@ export default function Consent() {
               </label>
               <button
                 onClick={() => close(fn)} disabled={!agreed} // no data-in: GSAP's inline opacity would hide the disabled state
-                className="mt-5 flex w-full items-center justify-between bg-paper px-6 py-4 text-ink transition-[opacity,background-color] hover:bg-paper/85 disabled:cursor-not-allowed disabled:opacity-20"
+                className="mt-5 flex w-full items-center justify-between rounded-full bg-paper px-6 py-3.5 text-ink transition-[opacity,background-color] hover:bg-paper/85 disabled:cursor-not-allowed disabled:opacity-20"
               >
-                <span className={label}>Agree &amp; download</span>
+                <span className="text-[15px] font-medium">Agree &amp; download</span>
                 <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M12 4v14M6 12l6 6 6-6M5 21h14" /></svg>
               </button>
             </>
           ) : (
-            <button ref={first} data-in onClick={() => close()} className={`w-full bg-paper px-6 py-4 text-ink ${label}`}>Got it</button>
+            <button ref={first} data-in onClick={() => close()} className="w-full rounded-full bg-paper px-6 py-3.5 text-[15px] font-medium text-ink">Got it</button>
           )}
         </div>
       </div>

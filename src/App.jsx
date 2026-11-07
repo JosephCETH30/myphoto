@@ -21,13 +21,15 @@ export default function App() {
   return (
     <>
       <h1 className="sr-only">Yoseph Photos</h1>
-      <header className="fixed inset-x-0 top-0 z-10 flex h-14 items-center justify-between px-gut text-[11px] uppercase tracking-[.2em] mix-blend-difference">
-        <span>Yoseph Rafael</span>
+      <header className="fixed inset-x-0 top-0 z-10 flex h-14 items-center justify-between px-gut text-sm mix-blend-difference">
+        <a href="/" aria-label="Yoseph Photos — home" className="-ml-1.5">
+          <img src="/logo/logo_atransumbaru_bgblack.png" alt="Yoseph Rafael" width="40" height="40" className="size-10" draggable={false} />
+        </a>
         <nav className="flex gap-5" aria-label="View">
           {MODES.map((m) => (
             <button
               key={m} onClick={() => setMode(m)} aria-pressed={mode === m}
-              className={`uppercase tracking-[.2em] transition-colors ${mode === m ? 'text-paper' : 'text-dim hover:text-paper'}`}
+              className={`capitalize transition-colors ${mode === m ? 'text-paper' : 'text-paper/50 hover:text-paper'}`}
             >{m}</button>
           ))}
         </nav>
@@ -37,9 +39,9 @@ export default function App() {
       ) : (
         <>
           <main><Gallery photos={photos} onOpen={setOpen} /></main>
-          <footer className="flex justify-between px-gut py-12 text-[11px] uppercase tracking-[.2em] text-dim">
+          <footer className="flex justify-between px-gut py-12 text-[13px] text-paper/50">
             <span>© {new Date().getFullYear()} Yoseph Rafael</span>
-            <button onClick={() => askDownload()} className="uppercase tracking-[.2em] transition-colors hover:text-paper">Copyright policy</button>
+            <button onClick={() => askDownload()} className="transition-colors hover:text-paper">Copyright policy</button>
           </footer>
         </>
       )}

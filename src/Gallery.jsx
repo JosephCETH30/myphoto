@@ -32,7 +32,7 @@ export default function Gallery({ photos, onOpen }) {
   return (
     <section id="work" ref={root} className="px-gut pt-14">
       {photos.length === 0 ? (
-        <p className="py-40 text-center text-[11px] uppercase tracking-[.2em] text-dim">Add photos to public/thanks-for-coming</p>
+        <p className="py-40 text-center text-sm text-paper/50">Add photos to public/thanks-for-coming</p>
       ) : (
         <div className="columns-1 gap-gut sm:columns-2 lg:columns-3">
           {photos.map((p, i) => (
@@ -51,7 +51,7 @@ export default function Gallery({ photos, onOpen }) {
               </button>
               <button
                 onClick={() => askDownload(() => downloadFile(downloadUrl(p.src)), p)} aria-label={`Download ${p.title || `photo ${i + 1}`}`}
-                className="absolute right-0 bottom-0 bg-ink px-3 py-2 text-[11px] uppercase tracking-[.2em] text-paper opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                className="absolute right-2 bottom-2 rounded-full bg-ink/85 px-3 py-1.5 text-[13px] font-medium text-paper opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
               >Download</button>
             </figure>
           ))}

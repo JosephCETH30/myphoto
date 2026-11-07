@@ -71,7 +71,7 @@ export default function Carousel({ photos, onOpen }) {
     else onOpen(i) // tap/click = view full size
   }
 
-  if (!n) return <p className="fixed inset-0 grid place-items-center text-[11px] uppercase tracking-[.2em] text-dim">Add photos to public/thanks-for-coming</p>
+  if (!n) return <p className="fixed inset-0 grid place-items-center text-sm text-paper/50">Add photos to public/thanks-for-coming</p>
 
   const p = photos[i]
   const side = 'hidden size-16 sm:grid lg:size-20'
@@ -96,13 +96,13 @@ export default function Carousel({ photos, onOpen }) {
         </div>
         <Magnet className={side} onClick={() => go(1)} aria-label="Next photo"><Arrow /></Magnet>
       </div>
-      <div className="flex h-16 items-center justify-between px-gut text-[11px] uppercase tracking-[.2em] text-dim tabular-nums sm:h-14">
+      <div className="flex h-16 items-center justify-between px-gut text-[13px] text-paper/55 tabular-nums sm:h-14">
         <span aria-live="polite">{pad(i + 1)} / {pad(n)}</span>
         <div className="flex gap-3 sm:hidden">
           <Magnet className="size-11" onClick={() => go(-1)} aria-label="Previous photo"><Arrow flip /></Magnet>
           <Magnet className="size-11" onClick={() => go(1)} aria-label="Next photo"><Arrow /></Magnet>
         </div>
-        <button onClick={() => askDownload(() => downloadFile(downloadUrl(p.src)), p)} className="uppercase tracking-[.2em] transition-colors hover:text-paper">Download</button>
+        <button onClick={() => askDownload(() => downloadFile(downloadUrl(p.src)), p)} className="transition-colors hover:text-paper">Download</button>
       </div>
     </section>
   )

@@ -7,8 +7,8 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v))
 // Touch-friendly slider.
 // Mouse: click or drag sets the value under the cursor.
 // Touch: tap jumps there; horizontal drag moves relative to where the finger started (no jumps);
-// vertical swipes stay with the page so the panel can scroll. Double-tap / double-click resets to 0.
-export default function Slider({ value, onChange, min = -100, max = 100, label, big }) {
+// vertical swipes stay with the page so the panel can scroll. Double-tap / double-click resets to `def`.
+export default function Slider({ value, onChange, min = -100, max = 100, def = 0, label, big }) {
   const track = useRef(null)
   const g = useRef(null)
   const lastTap = useRef(0)
@@ -39,7 +39,7 @@ export default function Slider({ value, onChange, min = -100, max = 100, label, 
     g.current = null
     if (!G) return
     const now = performance.now()
-    if (now - lastTap.current < 300) { onChange(0); lastTap.current = 0; return }
+    if (now - lastTap.current < 300) { onChange(clamp(def, min, max)); lastTap.current = 0; return }
     lastTap.current = now
     if (!G.mouse && !G.dragging) onChange(at(e.clientX)) // plain tap
   }
