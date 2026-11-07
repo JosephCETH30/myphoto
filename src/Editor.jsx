@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { WebGLRenderer, Scene, OrthographicCamera, PlaneGeometry, Mesh, ShaderMaterial, TextureLoader, Vector2, Vector4, CanvasTexture, LinearFilter } from 'three'
 import { url } from './imgix.js'
-import { CONTROLS, MAX_MASKS, MASK_TYPE, RANGE_MODE, toIQ } from './controls.js'
+import { CONTROLS, MAX_LAYERS, MAX_COMPS, MASK_TYPE, RANGE_MODE, OPS, toIQ, flatComps } from './controls.js'
 
 const vertexShader = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0., 1.); }`
 // Sliders arrive as -1..1. Order: detail (sharpen, clarity) on the source → exposure + white balance in linear
@@ -10,23 +10,24 @@ const fragmentShader = `
 uniform sampler2D uTex; uniform vec2 uTexel, uSize; uniform float uAspect, uBypass;
 uniform float exposure, brightness, contrast, highlights, shadows, whites, blacks;
 uniform float temperature, tint, saturation, vibrance, hue, clarity, sharpness, dehaze, vignette, fade, grain;
-// Masks (up to 4). Geometry is in image coords 0..1, y down. type: 0 none, 1 radial, 2 linear, 3 painted, 4 whole photo.
-// uMO = (feather, invert, amount, angle rad). uMR = range (mode, a, b, c): luminance (1, lo, hi, smooth), color (2, I, Q, tolerance).
-// Local deltas: uMA = (exposure, contrast, highlights, shadows), uMB = (temperature, tint, saturation, clarity), uMC = (whites, blacks, dehaze, sharpness).
-uniform float uMT[4]; uniform vec4 uMG[4], uMO[4], uMR[4], uMA[4], uMB[4], uMC[4];
-uniform sampler2D uM0, uM1, uM2, uM3; uniform float uShow;
+// Layers (≤4) of local adjustments. Each layer's mask = its components (≤8 total) combined in order with
+// add (max) / subtract / intersect. Component geometry is in image coords 0..1, y down.
+// type: 0 none, 1 radial, 2 linear, 3 painted (brush / AI object), 4 whole photo (narrowed by a range).
+// uCO = (feather, invert, angle rad, op). uCR = range (mode, a, b, c): luminance (1, lo, hi, smooth), color (2, I, Q, tolerance).
+// Layer deltas: uLA = (exposure, contrast, highlights, shadows), uLB = (temperature, tint, saturation, clarity), uLC = (whites, blacks, dehaze, sharpness).
+uniform float uCT[8], uCL[8]; uniform vec4 uCG[8], uCO[8], uCR[8];
+uniform sampler2D uC0, uC1, uC2, uC3, uC4, uC5, uC6, uC7;
+uniform vec4 uLA[4], uLB[4], uLC[4], uLAmt; uniform float uShow;
 varying vec2 vUv;
 float luma(vec3 c){ return dot(c, vec3(.2126, .7152, .0722)); }
 float rand(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
-float maskW(float type, vec4 g, vec4 o, vec4 rg, sampler2D t, vec2 ip, vec3 src){
-  if (type < .5) return 0.;
+float compW(float type, vec4 g, vec4 o, vec4 rg, sampler2D t, vec2 ip, vec3 src){
   float w;
-  if (type < 1.5) {          // radial ellipse (in pixels, rotated by o.w)
+  if (type < 1.5) {          // radial ellipse (in pixels, rotated by o.z)
     vec2 d = (ip - g.xy) * uSize;
-    float ca = cos(o.w), sa = sin(o.w);
+    float ca = cos(o.z), sa = sin(o.z);
     d = vec2(ca * d.x + sa * d.y, -sa * d.x + ca * d.y);
-    float dist = length(d / max(g.zw * uSize, vec2(1e-3)));
-    w = 1. - smoothstep(1. - o.x, 1.0001, dist);
+    w = 1. - smoothstep(1. - o.x, 1.0001, length(d / max(g.zw * uSize, vec2(1e-3))));
   } else if (type < 2.5) {   // linear: full effect at g.xy fading to none at g.zw
     vec2 a = g.xy * uSize, ab = g.zw * uSize - a;
     w = 1. - smoothstep(0., 1., dot(ip * uSize - a, ab) / max(dot(ab, ab), 1e-4));
@@ -43,7 +44,13 @@ float maskW(float type, vec4 g, vec4 o, vec4 rg, sampler2D t, vec2 ip, vec3 src)
     vec2 iq = vec2(dot(src, vec3(.596, -.274, -.322)), dot(src, vec3(.211, -.523, .312)));
     w *= 1. - smoothstep(rg.w * .5, rg.w, length(iq - rg.yz));
   }
-  return w * o.z;
+  return w;
+}
+// Combine component weight c into layer li of W: 0 add, 1 subtract, 2 intersect.
+void applyC(inout vec4 W, float li, float op, float c){
+  vec4 sel = vec4(equal(vec4(li), vec4(0., 1., 2., 3.)));
+  vec4 r = op < .5 ? max(W, vec4(c)) : op < 1.5 ? W * (1. - c) : W * c;
+  W = mix(W, r, sel);
 }
 void main(){
   vec3 c = texture2D(uTex, vUv).rgb;
@@ -51,11 +58,20 @@ void main(){
 
   vec2 ip = vec2(vUv.x, 1. - vUv.y);
   vec3 src = c;
-  float w0 = maskW(uMT[0], uMG[0], uMO[0], uMR[0], uM0, ip, src), w1 = maskW(uMT[1], uMG[1], uMO[1], uMR[1], uM1, ip, src);
-  float w2 = maskW(uMT[2], uMG[2], uMO[2], uMR[2], uM2, ip, src), w3 = maskW(uMT[3], uMG[3], uMO[3], uMR[3], uM3, ip, src);
-  vec4 la = w0 * uMA[0] + w1 * uMA[1] + w2 * uMA[2] + w3 * uMA[3];
-  vec4 lb = w0 * uMB[0] + w1 * uMB[1] + w2 * uMB[2] + w3 * uMB[3];
-  vec4 lc = w0 * uMC[0] + w1 * uMC[1] + w2 * uMC[2] + w3 * uMC[3];
+  vec4 W = vec4(0.);
+  if (uCT[0] > .5) applyC(W, uCL[0], uCO[0].w, compW(uCT[0], uCG[0], uCO[0], uCR[0], uC0, ip, src));
+  if (uCT[1] > .5) applyC(W, uCL[1], uCO[1].w, compW(uCT[1], uCG[1], uCO[1], uCR[1], uC1, ip, src));
+  if (uCT[2] > .5) applyC(W, uCL[2], uCO[2].w, compW(uCT[2], uCG[2], uCO[2], uCR[2], uC2, ip, src));
+  if (uCT[3] > .5) applyC(W, uCL[3], uCO[3].w, compW(uCT[3], uCG[3], uCO[3], uCR[3], uC3, ip, src));
+  if (uCT[4] > .5) applyC(W, uCL[4], uCO[4].w, compW(uCT[4], uCG[4], uCO[4], uCR[4], uC4, ip, src));
+  if (uCT[5] > .5) applyC(W, uCL[5], uCO[5].w, compW(uCT[5], uCG[5], uCO[5], uCR[5], uC5, ip, src));
+  if (uCT[6] > .5) applyC(W, uCL[6], uCO[6].w, compW(uCT[6], uCG[6], uCO[6], uCR[6], uC6, ip, src));
+  if (uCT[7] > .5) applyC(W, uCL[7], uCO[7].w, compW(uCT[7], uCG[7], uCO[7], uCR[7], uC7, ip, src));
+  vec4 M = W; // mask coverage per layer (for the overlay)
+  W *= uLAmt; // layer amount (0 when hidden)
+  vec4 la = W.x * uLA[0] + W.y * uLA[1] + W.z * uLA[2] + W.w * uLA[3];
+  vec4 lb = W.x * uLB[0] + W.y * uLB[1] + W.z * uLB[2] + W.w * uLB[3];
+  vec4 lc = W.x * uLC[0] + W.y * uLC[1] + W.z * uLC[2] + W.w * uLC[3];
   // Per-pixel values = global slider + masked local deltas.
   float pEx = exposure + la.x, pCo = contrast + la.y, pHi = highlights + la.z, pSh = shadows + la.w;
   float pTe = temperature + lb.x, pTi = tint + lb.y, pSa = saturation + lb.z, pCl = clarity + lb.w;
@@ -107,7 +123,7 @@ void main(){
   c += (rand(floor(vUv * uSize)) - .5) * grain * .18;
 
   if (uShow > -.5) { // red overlay on the selected mask (preview only)
-    float ws = uShow < .5 ? w0 : uShow < 1.5 ? w1 : uShow < 2.5 ? w2 : w3;
+    float ws = uShow < .5 ? M.x : uShow < 1.5 ? M.y : uShow < 2.5 ? M.z : M.w;
     c = mix(clamp(c, 0., 1.), vec3(1., .16, .12), ws * .5);
   }
 
@@ -116,7 +132,7 @@ void main(){
 
 // Adjusted photo on a canvas that fills its parent box. Preview renders at `res` (longest side, px)
 // so slider moves stay cheap; apiRef.current.snapshot() renders once at full resolution for export.
-export default function AdjustCanvas({ src, values, before, masks = [], show = -1, res, canvasRef, apiRef, onReady }) {
+export default function AdjustCanvas({ src, values, before, layers = [], show = -1, res, canvasRef, apiRef, onReady }) {
   const api = useRef(null)
   const [ready, setReady] = useState(false)
 
@@ -125,14 +141,16 @@ export default function AdjustCanvas({ src, values, before, masks = [], show = -
     const renderer = new WebGLRenderer({ canvas, antialias: false })
     renderer.setPixelRatio(1)
     const max = Math.min(renderer.capabilities.maxTextureSize, 8192)
-    const four = (f) => Array.from({ length: MAX_MASKS }, f)
+    const four = (f) => Array.from({ length: MAX_LAYERS }, f)
+    const eight = (f) => Array.from({ length: MAX_COMPS }, f)
     const u = {
       uTex: { value: null }, uBypass: { value: 0 }, uTexel: { value: new Vector2() }, uSize: { value: new Vector2() }, uAspect: { value: 1 },
       ...Object.fromEntries(CONTROLS.map(([k]) => [k, { value: 0 }])),
-      uMT: { value: four(() => 0) }, uMG: { value: four(() => new Vector4()) }, uMO: { value: four(() => new Vector4()) },
-      uMR: { value: four(() => new Vector4()) }, uMA: { value: four(() => new Vector4()) }, uMB: { value: four(() => new Vector4()) },
-      uMC: { value: four(() => new Vector4()) },
-      uM0: { value: null }, uM1: { value: null }, uM2: { value: null }, uM3: { value: null }, uShow: { value: -1 },
+      uCT: { value: eight(() => 0) }, uCL: { value: eight(() => 0) },
+      uCG: { value: eight(() => new Vector4()) }, uCO: { value: eight(() => new Vector4()) }, uCR: { value: eight(() => new Vector4()) },
+      ...Object.fromEntries(eight((_, k) => [`uC${k}`, { value: null }])),
+      uLA: { value: four(() => new Vector4()) }, uLB: { value: four(() => new Vector4()) }, uLC: { value: four(() => new Vector4()) },
+      uLAmt: { value: new Vector4() }, uShow: { value: -1 },
     }
     const brushTex = new Map() // brush canvas → texture
     const geo = new PlaneGeometry(2, 2)
@@ -150,38 +168,47 @@ export default function AdjustCanvas({ src, values, before, masks = [], show = -
         u.uBypass.value = bypass ? 1 : 0
         schedule()
       },
-      setMasks(ms, show) {
-        const live = new Set()
-        for (let i = 0; i < MAX_MASKS; i++) {
-          const m = ms[i]
+      setLayers(layers, show) {
+        const live = new Set(), comps = flatComps(layers)
+        for (let k = 0; k < MAX_COMPS; k++) {
+          const c = comps[k]
           // A color mask does nothing until a color is picked (otherwise it would cover the whole photo).
-          const off = m?.type === 'color' && !m.range.color
-          u.uMT.value[i] = m && !off ? MASK_TYPE[m.type] : 0
-          if (m) {
-            const v = (k) => m.vals[k] / 100, rg = m.range
-            u.uMG.value[i].set(...m.geo)
-            u.uMO.value[i].set(m.feather, m.invert ? 1 : 0, m.amount / 100, (m.angle * Math.PI) / 180)
-            u.uMA.value[i].set(v('exposure'), v('contrast'), v('highlights'), v('shadows'))
-            u.uMB.value[i].set(v('temperature'), v('tint'), v('saturation'), v('clarity'))
-            u.uMC.value[i].set(v('whites'), v('blacks'), v('dehaze'), v('sharpness'))
-            if (rg.mode === 'luminance') u.uMR.value[i].set(RANGE_MODE.luminance, rg.lo / 100, rg.hi / 100, rg.smooth / 100)
-            else if (rg.mode === 'color' && rg.color) u.uMR.value[i].set(RANGE_MODE.color, ...toIQ(rg.color), 0.02 + (rg.tol / 100) * 0.38)
-            else u.uMR.value[i].set(0, 0, 0, 0)
-          }
+          const off = !c || (c.type === 'color' && !c.range.color)
+          u.uCT.value[k] = off ? 0 : MASK_TYPE[c.type]
           let t = null
-          if (m?.canvas) {
-            t = brushTex.get(m.canvas)
-            if (!t) {
-              t = new CanvasTexture(m.canvas)
-              t.generateMipmaps = false; t.minFilter = LinearFilter
-              brushTex.set(m.canvas, t)
+          if (c) {
+            const rg = c.range
+            u.uCL.value[k] = c.li
+            u.uCG.value[k].set(...c.geo)
+            u.uCO.value[k].set(c.feather, c.invert ? 1 : 0, (c.angle * Math.PI) / 180, OPS[c.op])
+            if (rg.mode === 'luminance') u.uCR.value[k].set(RANGE_MODE.luminance, rg.lo / 100, rg.hi / 100, rg.smooth / 100)
+            else if (rg.mode === 'color' && rg.color) u.uCR.value[k].set(RANGE_MODE.color, ...toIQ(rg.color), 0.02 + (rg.tol / 100) * 0.38)
+            else u.uCR.value[k].set(0, 0, 0, 0)
+            if (c.canvas) {
+              t = brushTex.get(c.canvas)
+              if (!t) {
+                t = new CanvasTexture(c.canvas)
+                t.generateMipmaps = false; t.minFilter = LinearFilter
+                brushTex.set(c.canvas, t)
+              }
+              if (t.userData.ver !== c.ver) { t.userData.ver = c.ver; t.needsUpdate = true } // AI selection rewrote it
+              live.add(c.canvas)
             }
-            if (t.userData.ver !== m.ver) { t.userData.ver = m.ver; t.needsUpdate = true } // AI selection rewrote it
-            live.add(m.canvas)
           }
-          u['uM' + i].value = t
+          u['uC' + k].value = t
         }
         for (const [cv, t] of brushTex) if (!live.has(cv)) { t.dispose(); brushTex.delete(cv) }
+        const amt = [0, 0, 0, 0]
+        for (let i = 0; i < MAX_LAYERS; i++) {
+          const L = layers[i]
+          if (!L) continue
+          const v = (key) => L.vals[key] / 100
+          amt[i] = L.visible ? L.amount / 100 : 0
+          u.uLA.value[i].set(v('exposure'), v('contrast'), v('highlights'), v('shadows'))
+          u.uLB.value[i].set(v('temperature'), v('tint'), v('saturation'), v('clarity'))
+          u.uLC.value[i].set(v('whites'), v('blacks'), v('dehaze'), v('sharpness'))
+        }
+        u.uLAmt.value.set(...amt)
         u.uShow.value = show
         schedule()
       },
@@ -208,7 +235,7 @@ export default function AdjustCanvas({ src, values, before, masks = [], show = -
       },
       // A brush stroke changed mask i's canvas: re-upload it (at most once per frame).
       refreshMask(i) {
-        const t = u['uM' + i]?.value
+        const t = u['uC' + i]?.value
         if (t) { t.needsUpdate = true; schedule() }
       },
       resize(r) {
@@ -254,7 +281,7 @@ export default function AdjustCanvas({ src, values, before, masks = [], show = -
 
   useEffect(() => { api.current?.resize(res) }, [res, ready])
   useEffect(() => { api.current?.set(values, before) }, [values, before, ready])
-  useEffect(() => { api.current?.setMasks(masks, show) }, [masks, show, ready])
+  useEffect(() => { api.current?.setLayers(layers, show) }, [layers, show, ready])
 
   return <canvas ref={canvasRef} aria-hidden="true" className={`absolute inset-0 size-full ${ready ? '' : 'opacity-0'}`} />
 }

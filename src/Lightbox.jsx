@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { url, srcSet, downloadUrl, imgFallback } from './imgix.js'
 import Magnet from './Magnet.jsx'
 import { askDownload, downloadFile } from './Consent.jsx'
-import { CONTROLS, GROUPS, ZERO, MASK_CONTROLS, MASK_GROUPS, MASK_ZERO, MAX_MASKS } from './controls.js'
+import { CONTROLS, GROUPS, ZERO, MASK_CONTROLS, MASK_GROUPS, MASK_ZERO, MAX_LAYERS, MAX_COMPS, flatComps } from './controls.js'
 import Slider from './Slider.jsx'
 
 const AdjustCanvas = lazy(() => import('./Editor.jsx'))
@@ -35,6 +35,11 @@ const resize = (corner, s, dx, dy, an) => {
   const x = clamp(L ? fx - w : fx, 0, 1 - w), y = clamp(T ? fy - h : fy, 0, 1 - h)
   return { x, y, w, h }
 }
+const copyCanvas = (cv) => {
+  const o = Object.assign(document.createElement('canvas'), { width: cv.width, height: cv.height })
+  o.getContext('2d').drawImage(cv, 0, 0)
+  return o
+}
 const loadImg = (src) => new Promise((res, rej) => {
   const im = new Image()
   im.crossOrigin = 'anonymous'
@@ -42,10 +47,11 @@ const loadImg = (src) => new Promise((res, rej) => {
   im.onerror = rej
   im.src = src
 })
-// A new mask, in image coords (0..1, y down). Brush masks paint into their own canvas (≤1024px).
-const newMask = (type, nat, id) => {
+// A mask component, in image coords (0..1, y down). Brush/object components paint into their own canvas (≤1024px).
+// op = how it combines with the components before it in the same layer.
+const newMask = (type, nat, id, op = 'add') => {
   const base = {
-    id, type, feather: 0.5, invert: false, amount: 100, angle: 0, vals: { ...MASK_ZERO }, geo: [0, 0, 0, 0],
+    id, type, op, feather: 0.5, invert: false, angle: 0, geo: [0, 0, 0, 0],
     range: { mode: 'none', lo: 0, hi: 100, smooth: 20, color: null, tol: 30 },
   }
   if (type === 'radial') return { ...base, geo: [0.5, 0.5, 0.22, (0.22 * nat.w) / nat.h] }
@@ -56,14 +62,17 @@ const newMask = (type, nat, id) => {
   const s = Math.min(1, 1024 / Math.max(nat.w, nat.h))
   return { ...base, ver: 0, canvas: Object.assign(document.createElement('canvas'), { width: Math.round(nat.w * s), height: Math.round(nat.h * s) }) }
 }
-const cloneMask = (m, id) => {
-  const c = { ...m, id, vals: { ...m.vals }, range: { ...m.range }, geo: [...m.geo] }
-  if (m.canvas) {
-    c.canvas = Object.assign(document.createElement('canvas'), { width: m.canvas.width, height: m.canvas.height })
-    c.canvas.getContext('2d').drawImage(m.canvas, 0, 0)
+const cloneComp = (c, id) => {
+  const out = { ...c, id, range: { ...c.range }, geo: [...c.geo] }
+  if (c.canvas) {
+    out.canvas = Object.assign(document.createElement('canvas'), { width: c.canvas.width, height: c.canvas.height })
+    out.canvas.getContext('2d').drawImage(c.canvas, 0, 0)
   }
-  return c
+  return out
 }
+// An adjustment layer: its own sliders + amount, masked by its components.
+const newLayer = (id, comp, no) => ({ id, name: `Layer ${no}`, visible: true, amount: 100, vals: { ...MASK_ZERO }, comps: [comp] })
+const OP_UI = { add: ['+', 'Add'], subtract: ['−', 'Subtract'], intersect: ['∩', 'Intersect'] }
 const HINTS = {
   radial: 'Drag the middle to move · drag the dots to resize',
   linear: 'Solid line = full effect · dashed line = none',
@@ -72,12 +81,17 @@ const HINTS = {
   erase: 'Paint over areas to remove them from the mask',
   color: 'Tap the photo to pick a color',
   pickObject: 'Tap the object you want to select',
+  sel_lasso: 'Draw around the area you want',
+  sel_rect: 'Drag to select a rectangle',
+  sel_ellipse: 'Drag to select an ellipse',
+  sel_wand: 'Tap an area to select similar colors',
+  sel_brush: 'Paint the selection by hand',
   busy: 'Selecting object…',
   luminance: 'Affects bright or dark tones across the photo',
   colorDone: 'Changes only this color · adjust Range to widen it',
 }
 const TYPES = [
-  ['object', 'Object'], ['color', 'Color range'], ['luminance', 'Light range'],
+  ['select', 'Selection'], ['object', 'Object'], ['color', 'Color range'], ['luminance', 'Light range'],
   ['radial', 'Radial'], ['linear', 'Linear'], ['brush', 'Brush'],
 ]
 // JPEG blob → file download.
@@ -86,7 +100,7 @@ const downloadBlob = (blob, name) => {
   link.click()
   setTimeout(() => URL.revokeObjectURL(link.href), 2000)
 }
-const maskName = (m, all) => `${TYPES.find(([t]) => t === m.type)[1]} ${all.filter((x) => x.type === m.type).indexOf(m) + 1}`
+const typeName = (t) => TYPES.find(([k]) => k === t)[1]
 const fmt = (v, min = -100) => (v > 0 && min < 0 ? '+' : '') + v
 
 // ---- look
@@ -105,7 +119,8 @@ const I = {
   fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
   rotate: 'M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5',
   crop: 'M6 2v16h16M2 6h16v16',
-  reset: 'M4 4v5h5M4.6 15A8 8 0 1 0 6 7.3L4 9',
+  undo: 'M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11',
+  trash: 'M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3',
   save: 'M12 4v11M7 10l5 5 5-5M5 20h14',
   prev: 'M20 12H4M10 6l-6 6 6 6',
   next: 'M4 12h16M14 6l6 6-6 6',
@@ -123,6 +138,7 @@ const TypeIcon = ({ type }) => ({
   radial: <Icon><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4" strokeDasharray="2 2" /></Icon>,
   linear: <Icon d="M3 8h18M3 16h18M12 4v16" />,
   brush: <Icon d="M14 4l6 6-8.5 8.5a3 3 0 0 1-4.2 0l-1.8-1.8a3 3 0 0 1 0-4.2zM4 20h5" />,
+  select: <Icon d="M4 4h3M10 4h4M17 4h3v3M20 10v4M20 17v3h-3M14 20h-4M7 20H4v-3M4 14v-4M4 7V4" />,
   object: <Icon d="M12 3l1.9 4.6 4.6 1.9-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9zM18 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z" />,
   color: <Icon d="M12 3c3 4 6 7 6 11a6 6 0 0 1-12 0c0-4 3-7 6-11z" />,
   luminance: <Icon d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"><circle cx="12" cy="12" r="4" /></Icon>,
@@ -212,6 +228,7 @@ export default function Lightbox({ photos, index, setIndex }) {
   const cursorRef = useRef(null)
   const [box, setBox] = useState({ W: 0, H: 0 })
   const [nat, setNat] = useState(null) // photo's natural size (aspect is what matters)
+  const [loadErr, setLoadErr] = useState(false)
   // Zoom/pan lives in a ref and is written straight to the DOM (no React render per move); zc = committed zoom for the UI.
   const v = useRef({ z: 1, x: 0, y: 0 })
   const animate = useRef(true)
@@ -224,23 +241,33 @@ export default function Lightbox({ photos, index, setIndex }) {
   const [vals, setVals] = useState(ZERO)
   const [before, setBefore] = useState(false)
   const [ctl, setCtl] = useState('exposure')
-  const [masks, setMasks] = useState([])
-  const [mi, setMi] = useState(-1) // selected mask
+  const [layers, setLayers] = useState([])
+  const [li, setLi] = useState(-1) // selected layer
+  const [ci, setCi] = useState(0) // selected component in that layer
+  const [adding, setAdding] = useState(null) // null | { op, fresh: true (new layer) }
   const [mctl, setMctl] = useState('exposure')
   const [overlay, setOverlay] = useState(true)
   const [brush, setBrush] = useState({ size: 60, hard: 50, erase: false })
+  // Selection tools (for "Selection" masks): tool, how a new selection combines, feather, magic-wand settings.
+  const [sel, setSel] = useState({ tool: 'lasso', mode: 'add', feather: 0, tol: 30, contiguous: true })
+  const [selDraft, setSelDraft] = useState(null) // shape being drawn: { tool, a, b, pts }
   const [picking, setPicking] = useState(false) // false | 'color' (eyedropper) | 'object' (AI tap)
   const [segBusy, setSegBusy] = useState(false)
   const [preview, setPreview] = useState(null) // { before, after, blob } object URLs of the final render
   const [building, setBuilding] = useState(false)
   const [guide, setGuide] = useState(() => { try { return localStorage.maskGuide !== 'off' } catch { return true } })
+  // Every time the viewer opens: highlight the edit tools and explain why they're here (until dismissed).
+  const [editTip, setEditTip] = useState(false)
+  const tipSeen = useRef(false) // per opening of the viewer
+  const closeEditTip = () => { setEditTip(false); tipSeen.current = true }
   const closeGuide = () => { setGuide(false); try { localStorage.maskGuide = 'off' } catch { /* private mode */ } }
   const nextId = useRef(1)
+  const layerNo = useRef(0) // for "Layer 1, 2…" names
   const [glReady, setGlReady] = useState(false)
 
   // New photo = fresh start.
   useEffect(() => {
-    setNat(null); setR(0); setCrop(null); setDraft(null); setVals(ZERO); setGlReady(false); setMasks([]); setMi(-1); setPicking(false)
+    setNat(null); setR(0); setCrop(null); setDraft(null); setVals(ZERO); setGlReady(false); setLoadErr(false); setLayers([]); setLi(-1); setCi(0); setAdding(null); setPicking(false); layerNo.current = 0
     v.current = { z: 1, x: 0, y: 0 }; setZc(1)
   }, [p.src])
 
@@ -251,13 +278,15 @@ export default function Lightbox({ photos, index, setIndex }) {
     return () => ro.disconnect()
   }, [])
 
-  const maskEdited = masks.some((m) => MASK_CONTROLS.some(([k]) => m.vals[k] !== 0))
+  const maskEdited = layers.some((L) => L.visible && L.amount > 0 && MASK_CONTROLS.some(([k]) => L.vals[k] !== 0))
   const adjusted = CONTROLS.some(([k]) => vals[k] !== 0) || maskEdited
   const useGl = adjusted || panel === 'adjust' || panel === 'mask'
   useEffect(() => { if (!useGl) setGlReady(false) }, [useGl])
   const cropping = !!draft
   const masking = panel === 'mask' && !cropping
-  const am = masks[mi] // selected mask
+  const al = layers[li] // selected layer
+  const am = al?.comps[ci] // selected mask component
+  const nComps = layers.reduce((n, L) => n + L.comps.length, 0)
   const edited = adjusted || !!crop || r % 360 !== 0
 
   // Layout: the visible (rotated, cropped) photo is fit into the stage; k = screen px per photo px.
@@ -329,31 +358,100 @@ export default function Lightbox({ photos, index, setIndex }) {
   }
   const applyCrop = () => { setCrop(isFull(draft) ? null : draft); setDraft(null) }
   const togglePanel = (name) => { setDraft(null); setPanel((x) => (x === name ? null : name)) }
-  const resetAll = () => { setR(0); setCrop(null); setDraft(null); setVals(ZERO); setMasks([]); setMi(-1); fit() }
+  const resetAll = () => { setR(0); setCrop(null); setDraft(null); setVals(ZERO); setLayers([]); setLi(-1); setCi(0); setAdding(null); setPicking(false); fit() }
+
+  // ---- undo history. Edits settle for 300ms before becoming one step (a slider drag = one step).
+  // Painted canvases change in place, so each step keeps its own copy of them.
+  const snap = (st) => ({ ...st, layers: st.layers.map((L) => ({ ...L, comps: L.comps.map((c2) => (c2.canvas ? { ...c2, canvas: copyCanvas(c2.canvas) } : c2)) })) })
+  const hist = useRef([])
+  const committed = useRef(null)
+  const pending = useRef(0) // timer id while a change hasn't settled yet
+  const restoring = useRef(false)
+  const [canUndo, setCanUndo] = useState(false)
+  useEffect(() => {
+    const cur = { r, crop, vals, layers }
+    if (!committed.current || restoring.current) {
+      restoring.current = false
+      committed.current = snap(cur)
+      return
+    }
+    pending.current = setTimeout(() => {
+      pending.current = 0
+      if (!committed.current) { committed.current = snap(cur); return }
+      hist.current.push(committed.current)
+      if (hist.current.length > 40) hist.current.shift()
+      committed.current = snap(cur)
+      setCanUndo(true)
+    }, 300)
+    return () => { clearTimeout(pending.current); pending.current = 0 }
+  }, [r, crop, vals, layers]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { clearTimeout(pending.current); pending.current = 0; hist.current = []; committed.current = null; setCanUndo(false) }, [p.src])
+  const undo = () => {
+    // A change still settling is undone first; otherwise step back one saved step.
+    const S = pending.current ? committed.current : hist.current.pop()
+    if (!S) return
+    clearTimeout(pending.current); pending.current = 0
+    restoring.current = true
+    setR(S.r); setCrop(S.crop); setVals(S.vals); setDraft(null); setPicking(false); setAdding(null)
+    setLayers(S.layers.map((L) => ({ ...L, comps: L.comps.map((c2) => (c2.canvas ? { ...c2, canvas: copyCanvas(c2.canvas), ver: (c2.ver || 0) + 1 } : c2)) })))
+    setLi((i) => Math.min(i, S.layers.length - 1)); setCi(0)
+    setCanUndo(hist.current.length > 0)
+    fit()
+  }
+  const dirty = edited || layers.length > 0
   const pickAspect = (val) => {
     setAspect(val)
     const av = val === -1 ? RW / RH : val
     if (av) setDraft(fitAspect((av * RH) / RW))
   }
 
-  // ---- masks
-  const updMask = (patch) => setMasks((ms) => ms.map((m, i) => (i === mi ? { ...m, ...(typeof patch === 'function' ? patch(m) : patch) } : m)))
+  useEffect(() => {
+    if (!nat || tipSeen.current) return
+    const t2 = setTimeout(() => setEditTip(true), 700)
+    return () => clearTimeout(t2)
+  }, [nat])
+
+  // ---- layers + mask components
+  const updLayer = (patch) => setLayers((ls) => ls.map((L, i) => (i === li ? { ...L, ...(typeof patch === 'function' ? patch(L) : patch) } : L)))
+  const updMask = (patch) => updLayer((L) => ({ comps: L.comps.map((c, j) => (j === ci ? { ...c, ...(typeof patch === 'function' ? patch(c) : patch) } : c)) }))
+  const armPicker = (type) => setPicking(type === 'color' ? 'color' : type === 'object' ? 'object' : false)
+  // Add a component of `type`: as a new layer, or into the selected layer with adding.op.
   const addMask = (type) => {
-    if (!nat || masks.length >= MAX_MASKS) return
-    setMasks((ms) => [...ms, newMask(type, nat, nextId.current++)])
-    setMi(masks.length); setOverlay(true)
-    setPicking(type === 'color' ? 'color' : type === 'object' ? 'object' : false)
+    if (!nat || nComps >= MAX_COMPS) return
+    const comp = newMask(type, nat, nextId.current++, adding?.fresh || !al ? 'add' : adding.op)
+    if (adding?.fresh || !al) {
+      if (layers.length >= MAX_LAYERS) return
+      setLayers((ls) => [...ls, newLayer(nextId.current++, comp, ++layerNo.current)])
+      setLi(layers.length); setCi(0)
+    } else {
+      updLayer((L) => ({ comps: [...L.comps, comp] }))
+      setCi(al.comps.length)
+    }
+    setAdding(null); setOverlay(true); armPicker(type)
   }
-  const delMask = () => {
-    setMasks((ms) => ms.filter((_, i) => i !== mi))
-    setMi((i) => Math.min(i, masks.length - 2))
-    setPicking(false)
+  const delMask = () => { // remove the selected component (the layer goes with its last one)
+    if (al.comps.length <= 1) return delLayer()
+    updLayer((L) => ({ comps: L.comps.filter((_, j) => j !== ci) }))
+    setCi((j) => Math.max(0, j - 1)); setPicking(false)
   }
-  const dupMask = () => {
-    if (!am || masks.length >= MAX_MASKS) return
-    setMasks((ms) => [...ms, cloneMask(am, nextId.current++)])
-    setMi(masks.length)
+  const delLayer = () => {
+    setLayers((ls) => ls.filter((_, i) => i !== li))
+    setLi((i) => Math.min(i, layers.length - 2)); setCi(0); setPicking(false)
   }
+  const dupLayer = () => {
+    if (!al || layers.length >= MAX_LAYERS || nComps + al.comps.length > MAX_COMPS) return
+    const copy = { ...al, id: nextId.current++, name: `Layer ${++layerNo.current}`, vals: { ...al.vals }, comps: al.comps.map((c) => cloneComp(c, nextId.current++)) }
+    setLayers((ls) => [...ls, copy]); setLi(layers.length); setCi(0)
+  }
+  const moveLayer = (d) => {
+    const j = li + d
+    if (j < 0 || j >= layers.length) return
+    setLayers((ls) => { const out = [...ls]; [out[li], out[j]] = [out[j], out[li]]; return out })
+    setLi(j)
+  }
+  const toggleLayer = (i) => setLayers((ls) => ls.map((L, k) => (k === i ? { ...L, visible: !L.visible } : L)))
+  const selectLayer = (i) => { setLi(i); setCi(0); setPicking(false); setAdding(null) }
+  const slotOf = (id) => flatComps(layers).findIndex((c) => c.id === id)
   const updRange = (patch) => updMask((m) => ({ range: { ...m.range, ...patch } }))
   const pickColor = (e) => {
     e.stopPropagation()
@@ -384,7 +482,7 @@ export default function Lightbox({ photos, index, setIndex }) {
       g.globalCompositeOperation = 'source-over'
       g.clearRect(0, 0, m.canvas.width, m.canvas.height)
       g.drawImage(tmp, 0, 0, m.canvas.width, m.canvas.height)
-      setMasks((ms) => ms.map((x2) => (x2.id === m.id ? { ...x2, ver: (x2.ver || 0) + 1, selected: true } : x2)))
+      setLayers((ls) => ls.map((L) => ({ ...L, comps: L.comps.map((x2) => (x2.id === m.id ? { ...x2, ver: (x2.ver || 0) + 1, selected: true } : x2)) })))
     } catch {
       alert('Object selection could not run on this device. Use the Brush to paint the area instead.')
     }
@@ -406,11 +504,12 @@ export default function Lightbox({ photos, index, setIndex }) {
     const grad = g.createRadialGradient(cx, cy, rad * (brush.hard / 100) * 0.95, cx, cy, rad)
     grad.addColorStop(0, 'rgba(255,255,255,1)')
     grad.addColorStop(1, 'rgba(255,255,255,0)')
-    g.globalCompositeOperation = brush.erase ? 'destination-out' : 'source-over'
+    const erase = am.type === 'select' ? sel.mode === 'subtract' : brush.erase
+    g.globalCompositeOperation = erase ? 'destination-out' : 'source-over'
     g.fillStyle = grad
     g.beginPath(); g.arc(cx, cy, rad, 0, Math.PI * 2); g.fill()
     md.current.last = [x, y]
-    glApi.current?.refreshMask(mi)
+    glApi.current?.refreshMask(slotOf(am.id))
   }
   const stroke = (x, y) => {
     const L = md.current.last
@@ -423,7 +522,7 @@ export default function Lightbox({ photos, index, setIndex }) {
   }
   const moveCursor = (e) => {
     const el = cursorRef.current
-    if (!el || !am?.canvas) return
+    if (!el || !am?.canvas || (am.type === 'select' && sel.tool !== 'brush')) return
     const [x, y] = toImg(e)
     el.setAttribute('cx', x * nat.w); el.setAttribute('cy', y * nat.h)
     el.setAttribute('r', brush.size / 2 / screenPerImg())
@@ -442,6 +541,12 @@ export default function Lightbox({ photos, index, setIndex }) {
     if (!D) return
     const [x, y] = toImg(e)
     if (D.mode === 'paint') return stroke(x, y)
+    if (D.mode === 'sel') {
+      const L = D.pts[D.pts.length - 1]
+      if (D.tool === 'lasso' && Math.hypot(x - L[0], y - L[1]) > 0.002) D.pts.push([x, y])
+      D.b = [x, y]
+      return setSelDraft({ ...D, pts: [...D.pts] })
+    }
     const [g0, g1, g2, g3] = D.g, dx = x - D.x, dy = y - D.y
     // Radial radii: distance along the ellipse's own (rotated) axes, in pixels.
     const W = nat.w, H = nat.h, an2 = (am.angle * Math.PI) / 180
@@ -457,7 +562,91 @@ export default function Lightbox({ photos, index, setIndex }) {
     }[D.mode]
     updMask({ geo })
   }
-  const dropMask = () => { md.current = null }
+  const dropMask = () => {
+    const D = md.current
+    md.current = null
+    if (D?.mode === 'paint' && am) bumpVer(am.id) // makes the stroke an undo step
+    if (D?.mode !== 'sel') return
+    setSelDraft(null)
+    const [x0, y0] = D.a, [x1, y1] = D.b
+    if (D.tool === 'lasso') {
+      if (D.pts.length > 2) commitSel((g, W, H) => { g.beginPath(); D.pts.forEach(([x, y], i) => (i ? g.lineTo(x * W, y * H) : g.moveTo(x * W, y * H))); g.closePath(); g.fill() })
+    } else if (Math.abs(x1 - x0) > 0.004 && Math.abs(y1 - y0) > 0.004) {
+      commitSel((g, W, H) => {
+        if (D.tool === 'rect') g.fillRect(Math.min(x0, x1) * W, Math.min(y0, y1) * H, Math.abs(x1 - x0) * W, Math.abs(y1 - y0) * H)
+        else { g.beginPath(); g.ellipse(((x0 + x1) / 2) * W, ((y0 + y1) / 2) * H, (Math.abs(x1 - x0) / 2) * W, (Math.abs(y1 - y0) / 2) * H, 0, 0, Math.PI * 2); g.fill() }
+      })
+    }
+  }
+  const bumpVer = (id) => setLayers((ls) => ls.map((L) => ({ ...L, comps: L.comps.map((c) => (c.id === id ? { ...c, ver: (c.ver || 0) + 1 } : c)) })))
+  // Draw a shape (white) into the selection canvas: New replaces, Add unions, Subtract cuts. Feather = blur.
+  const commitSel = (draw) => {
+    const cv = am.canvas, W = cv.width, H = cv.height
+    const shape = Object.assign(document.createElement('canvas'), { width: W, height: H })
+    const sg = shape.getContext('2d')
+    sg.fillStyle = '#fff'
+    draw(sg, W, H)
+    let src = shape
+    const fpx = (sel.feather / 100) * 0.03 * Math.max(W, H)
+    if (fpx > 0.5) {
+      src = Object.assign(document.createElement('canvas'), { width: W, height: H })
+      const bg = src.getContext('2d')
+      bg.filter = `blur(${fpx}px)` // browsers without canvas filters just get a hard edge
+      bg.drawImage(shape, 0, 0)
+    }
+    const g = cv.getContext('2d')
+    g.save()
+    if (sel.mode === 'new') g.clearRect(0, 0, W, H)
+    g.globalCompositeOperation = sel.mode === 'subtract' ? 'destination-out' : 'source-over'
+    g.drawImage(src, 0, 0)
+    g.restore()
+    bumpVer(am.id)
+  }
+  // Magic wand: pixels within tolerance of the tapped color; contiguous = flood fill from the tap.
+  const wand = (x, y) => {
+    const cv = am.canvas, W = cv.width, H = cv.height
+    const img = glApi.current?.imageCanvas(Math.max(W, H))
+    if (!img) return
+    const tc = Object.assign(document.createElement('canvas'), { width: W, height: H })
+    const tg = tc.getContext('2d', { willReadFrequently: true })
+    tg.drawImage(img, 0, 0, W, H)
+    const d = tg.getImageData(0, 0, W, H).data
+    const si = (clamp(Math.round(y * (H - 1)), 0, H - 1) * W + clamp(Math.round(x * (W - 1)), 0, W - 1)) * 4
+    const r0 = d[si], g0 = d[si + 1], b0 = d[si + 2], lim2 = ((sel.tol / 100) * 170) ** 2
+    const near = (i) => { const q = i * 4, dr = d[q] - r0, dg = d[q + 1] - g0, db = d[q + 2] - b0; return dr * dr + dg * dg + db * db <= lim2 }
+    const hit = new Uint8Array(W * H)
+    if (sel.contiguous) {
+      const stack = [si / 4]
+      hit[si / 4] = 1
+      while (stack.length) {
+        const i = stack.pop(), px = i % W
+        if (px > 0 && !hit[i - 1] && near(i - 1)) { hit[i - 1] = 1; stack.push(i - 1) }
+        if (px < W - 1 && !hit[i + 1] && near(i + 1)) { hit[i + 1] = 1; stack.push(i + 1) }
+        if (i >= W && !hit[i - W] && near(i - W)) { hit[i - W] = 1; stack.push(i - W) }
+        if (i < W * (H - 1) && !hit[i + W] && near(i + W)) { hit[i + W] = 1; stack.push(i + W) }
+      }
+    } else for (let i = 0; i < W * H; i++) hit[i] = near(i) ? 1 : 0
+    commitSel((g) => {
+      const id = g.createImageData(W, H)
+      for (let i = 0; i < W * H; i++) if (hit[i]) id.data.fill(255, i * 4, i * 4 + 4)
+      g.putImageData(id, 0, 0)
+    })
+  }
+  const selStart = (e) => {
+    e.stopPropagation()
+    capture(e.currentTarget, e)
+    const [x, y] = toImg(e)
+    if (sel.tool === 'wand') return wand(clamp(x, 0, 1), clamp(y, 0, 1))
+    if (sel.tool === 'brush') { md.current = { mode: 'paint', last: null }; return dab(x, y) }
+    md.current = { mode: 'sel', tool: sel.tool, a: [x, y], b: [x, y], pts: [[x, y]] }
+    setSelDraft({ ...md.current })
+  }
+  const selAll = (fill) => {
+    const cv = am.canvas, g = cv.getContext('2d')
+    g.save(); g.globalCompositeOperation = 'source-over'; g.clearRect(0, 0, cv.width, cv.height)
+    if (fill) { g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height) }
+    g.restore(); bumpVer(am.id)
+  }
 
   // ---- render the final JPEG: (adjusted snapshot or full-res original) → rotate → crop.
   // withEdits=false gives the matching "before" (same rotation + crop, no adjustments).
@@ -503,10 +692,19 @@ export default function Lightbox({ photos, index, setIndex }) {
     if (preview) { URL.revokeObjectURL(preview.after); URL.revokeObjectURL(preview.before) }
     setPreview(null)
   }
-  // Edited → preview first, download from there; untouched → the original file.
+  const downloadEdited = async () => {
+    setBuilding(true)
+    try { downloadBlob(await render(true), editedName) } catch (err) {
+      console.error('render failed', err)
+      alert('Could not save this photo. Try another browser.')
+    }
+    setBuilding(false)
+  }
+  // Edited → the edited JPEG; untouched → the original file. Both behind the copyright check.
   const saveAndDownload = () => edited
-    ? openPreview()
+    ? askDownload(downloadEdited, { ...p, edited: true })
     : askDownload(() => downloadFile(downloadUrl(p.src)), p)
+  const previewDisabled = !edited || cropping || building || segBusy || (adjusted && !glReady)
   const saving = building
   const saveDisabled = cropping || building || segBusy || (adjusted && !glReady)
 
@@ -604,7 +802,7 @@ export default function Lightbox({ photos, index, setIndex }) {
   // ---- keyboard
   useEffect(() => {
     const key = (e) => {
-      if (e.key !== 'Escape' && e.target.closest?.('input, [role=slider]')) return // sliders keep their arrow keys; Esc always works
+      if (e.key !== 'Escape' && !e.metaKey && !e.ctrlKey && e.target.closest?.('input, [role=slider]')) return // sliders keep their arrow keys; Esc / ⌘Z always work
       const k2 = e.key, z1 = v.current.z <= 1.001
       if (preview) { if (k2 === 'Escape') closePreview(); return }
       if (k2 === 'Escape') picking ? setPicking(false) : cropping ? setDraft(null) : panel ? setPanel(null) : close()
@@ -615,6 +813,7 @@ export default function Lightbox({ photos, index, setIndex }) {
       else if (k2 === '-' && !cropping) zoom((z) => z / 1.5)
       else if (k2 === '0') fit()
       else if (k2 === 'r' || k2 === 'R') rotate()
+      else if ((e.metaKey || e.ctrlKey) && (k2 === 'z' || k2 === 'Z')) { e.preventDefault(); undo() }
       else if (k2 === 'c' || k2 === 'C') startCrop()
     }
     addEventListener('keydown', key)
@@ -653,7 +852,10 @@ export default function Lightbox({ photos, index, setIndex }) {
               <span className="text-[13px] text-paper/60 tabular-nums">{index + 1} / {n}</span>
               <Tool className="hidden lg:flex" label="Next" tip="right" onClick={() => go(1)} disabled={n < 2 || cropping}><Icon d={I.next} /></Tool>
             </div>
-            <SaveButton className="lg:hidden" onClick={saveAndDownload} disabled={saveDisabled} saving={saving} />
+            <div className="flex gap-2 lg:hidden">
+              <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />
+              <SaveButton onClick={saveAndDownload} disabled={saveDisabled} saving={saving} />
+            </div>
           </nav>
 
           {/* Photo */}
@@ -664,13 +866,22 @@ export default function Lightbox({ photos, index, setIndex }) {
           >
             {masking && am && (
               <p className="pointer-events-none absolute top-3 left-1/2 z-10 max-w-[90%] -translate-x-1/2 truncate rounded-full bg-ink/75 px-3.5 py-1.5 text-[12px] text-paper/90">
-                {HINTS[segBusy ? 'busy' : picking === 'object' ? 'pickObject' : picking ? 'color' : am.canvas && brush.erase ? 'erase' : am.type === 'color' ? 'colorDone' : am.type]}
+                {HINTS[segBusy ? 'busy' : picking === 'object' ? 'pickObject' : picking ? 'color' : am.type === 'select' ? `sel_${sel.tool}` : am.canvas && brush.erase ? 'erase' : am.type === 'color' ? 'colorDone' : am.type]}
               </p>
+            )}
+            {loadErr && !nat && (
+              <div className="absolute inset-0 z-10 grid place-items-center p-6 text-center">
+                <div>
+                  <p className="text-[15px] text-paper">This photo couldn’t be loaded</p>
+                  <p className="mt-1 text-[13px] text-paper/55">It may not be online yet. Try another photo or come back later.</p>
+                </div>
+              </div>
             )}
             <motion.div key={p.src} className="absolute inset-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}>
               {!nat ? (
                 <img {...imgProps} sizes="100vw" className="absolute object-contain" style={{ left: PAD, top: PAD, width: Math.max(0, box.W - 2 * PAD), height: Math.max(0, AH) }}
-                  onLoad={(e) => measure(e.currentTarget)} ref={measure} />
+                  onLoad={(e) => measure(e.currentTarget)} ref={measure}
+                  onError={(e) => { if (e.currentTarget.dataset.fallback || !e.currentTarget.src.includes('imgix')) setLoadErr(true); imgFallback(e) }} />
               ) : (
                 <div ref={viewEl} className="absolute top-1/2 left-1/2 overflow-hidden" style={{ width: VW, height: VH }}>
                   <div className="absolute" style={{ left: -c.x * RW * k, top: -c.y * RH * k, width: RW * k, height: RH * k, transition: t(['left', 'top', 'width', 'height']) }}>
@@ -682,7 +893,7 @@ export default function Lightbox({ photos, index, setIndex }) {
                       {useGl && (
                         <Suspense fallback={null}>
                           <AdjustCanvas
-                            src={p.src} values={vals} before={before} masks={masks} show={masking && overlay && am ? mi : -1}
+                            src={p.src} values={vals} before={before} layers={layers} show={masking && overlay && al ? li : -1}
                             res={Math.ceil(longSide * dpr)} canvasRef={canvasRef} apiRef={glApi} onReady={() => setGlReady(true)}
                           />
                         </Suspense>
@@ -692,14 +903,21 @@ export default function Lightbox({ photos, index, setIndex }) {
                       {masking && am && (
                         <svg
                           ref={svgRef} viewBox={`0 0 ${nat.w} ${nat.h}`} preserveAspectRatio="none"
-                          className={`absolute inset-0 size-full overflow-visible ${am.canvas && !picking ? 'cursor-none' : 'pointer-events-none'}`}
+                          className={`absolute inset-0 size-full overflow-visible ${!am.canvas || picking ? 'pointer-events-none' : am.type === 'select' && sel.tool !== 'brush' ? 'cursor-crosshair' : 'cursor-none'}`}
                           onPointerMove={dragMask} onPointerUp={dropMask} onPointerCancel={dropMask}
                           onPointerLeave={() => cursorRef.current && (cursorRef.current.style.opacity = 0)}
                         >
                           {picking && <rect width={nat.w} height={nat.h} fill="transparent" className="pointer-events-auto cursor-crosshair" onPointerDown={picking === 'object' ? pickObject : pickColor} />}
                           {!picking && !segBusy && am.canvas && (
                             <>
-                              <rect width={nat.w} height={nat.h} fill="transparent" className="pointer-events-auto" onPointerDown={grabMask('paint')} />
+                              <rect width={nat.w} height={nat.h} fill="transparent" className="pointer-events-auto" onPointerDown={am.type === 'select' ? selStart : grabMask('paint')} />
+                              {selDraft && (() => {
+                                const W = nat.w, H = nat.h, [x0, y0] = selDraft.a, [x1, y1] = selDraft.b
+                                const look = { fill: 'rgb(255 255 255 / .12)', stroke: 'white', strokeWidth: 1.5, strokeDasharray: '6 4', vectorEffect: 'non-scaling-stroke', className: 'pointer-events-none' }
+                                if (selDraft.tool === 'lasso') return <polygon points={selDraft.pts.map(([x, y]) => `${x * W},${y * H}`).join(' ')} {...look} />
+                                if (selDraft.tool === 'rect') return <rect x={Math.min(x0, x1) * W} y={Math.min(y0, y1) * H} width={Math.abs(x1 - x0) * W} height={Math.abs(y1 - y0) * H} {...look} />
+                                return <ellipse cx={((x0 + x1) / 2) * W} cy={((y0 + y1) / 2) * H} rx={(Math.abs(x1 - x0) / 2) * W} ry={(Math.abs(y1 - y0) / 2) * H} {...look} />
+                              })()}
                               <circle ref={cursorRef} r="0" fill="none" stroke="white" strokeWidth="1.5" vectorEffect="non-scaling-stroke" style={{ opacity: 0 }} className="pointer-events-none" />
                             </>
                           )}
@@ -804,36 +1022,101 @@ export default function Lightbox({ photos, index, setIndex }) {
                 ) : (
                   <>
                     <div className="flex items-center justify-between">
-                      <p className={T.title}>Masks</p>
+                      <p className={T.title}>Layers</p>
                       <div className="flex items-center gap-3">
-                        <span className={T.muted}>{masks.length} / {MAX_MASKS}</span>
+                        <span className={T.muted}>{layers.length} / {MAX_LAYERS}</span>
                         <button aria-label="How masking works" onClick={() => setGuide((g) => !g)} className={`grid size-7 place-items-center rounded-full text-[13px] transition-colors ${guide ? 'bg-paper text-ink' : 'bg-paper/[.08] text-paper/70 hover:text-paper'}`}>?</button>
                       </div>
                     </div>
                     {guide && <MaskGuide onClose={closeGuide} />}
-                    <div className="mt-3 grid grid-cols-3 gap-2">
-                      {TYPES.map(([type, name]) => (
-                        <button
-                          key={type} onClick={() => addMask(type)} disabled={masks.length >= MAX_MASKS || !nat || !glReady}
-                          className="flex h-11 items-center justify-center gap-1.5 rounded-xl bg-paper/[.06] text-[13px] text-paper/80 transition-colors hover:bg-paper/[.1] hover:text-paper disabled:opacity-30 lg:h-16 lg:flex-col lg:gap-1"
-                        >
-                          <TypeIcon type={type} />{name}
-                        </button>
-                      ))}
-                    </div>
-                    {masks.length > 0 && (
-                      <div className="-mx-gut mt-4 flex gap-2 overflow-x-auto px-gut [scrollbar-width:none] lg:mx-0 lg:flex-wrap lg:px-0 [&::-webkit-scrollbar]:hidden">
-                        {masks.map((m, i) => <button key={m.id} className={chip(i === mi)} onClick={() => { setMi(i); setPicking(false) }}>{maskName(m, masks)}</button>)}
+                    {!glReady && <p className={`mt-3 ${T.muted}`}>Loading full resolution…</p>}
+
+                    {/* Layer list */}
+                    {layers.length > 0 && (
+                      <ul className="mt-3 space-y-1">
+                        {layers.map((L, i) => (
+                          <li key={L.id}>
+                            <div className={`flex h-11 items-center gap-2 rounded-xl pr-2 pl-1 transition-colors ${i === li ? 'bg-paper/[.1]' : 'hover:bg-paper/[.05]'}`}>
+                              <button aria-label={L.visible ? 'Hide layer' : 'Show layer'} onClick={() => toggleLayer(i)} className={`grid size-9 place-items-center rounded-lg ${L.visible ? 'text-paper' : 'text-paper/30'}`}>
+                                <Icon d={L.visible ? 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z' : 'M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3 3.6M6.6 6.6C3.9 8.3 2 12 2 12s4 7 10 7a9.6 9.6 0 0 0 5.4-1.6'} className="size-4">{L.visible && <circle cx="12" cy="12" r="3" />}</Icon>
+                              </button>
+                              <button className="flex min-w-0 flex-1 items-center justify-between text-left" onClick={() => selectLayer(i)}>
+                                <span className={`truncate text-[13px] ${L.visible ? 'text-paper' : 'text-paper/40'}`}>{L.name}</span>
+                                <span className="ml-2 shrink-0 text-xs text-paper/45">{L.comps.map((c) => typeName(c.type)).join(' · ')}</span>
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <button
+                      className={`mt-3 w-full ${btn(adding?.fresh)} disabled:opacity-30`}
+                      disabled={layers.length >= MAX_LAYERS || nComps >= MAX_COMPS || !nat}
+                      onClick={() => setAdding((a2) => (a2?.fresh ? null : { op: 'add', fresh: true }))}
+                    >+ New layer</button>
+
+                    {/* Type picker: for a new layer or a new mask inside the selected layer */}
+                    {adding && (
+                      <div className="mt-3 rounded-xl bg-paper/[.04] p-3">
+                        <div className="flex items-center justify-between">
+                          <p className={T.title}>{adding.fresh ? 'New layer: choose a mask' : `${OP_UI[adding.op][1]} a mask ${adding.op === 'add' ? 'to' : adding.op === 'subtract' ? 'from' : 'with'} ${al?.name}`}</p>
+                          <button className="text-[13px] text-paper/55 hover:text-paper" onClick={() => setAdding(null)}>Cancel</button>
+                        </div>
+                        <div className="mt-3 grid grid-cols-3 gap-2">
+                          {TYPES.map(([type, name]) => (
+                            <button
+                              key={type} onClick={() => addMask(type)}
+                              className="flex h-11 items-center justify-center gap-1.5 rounded-xl bg-paper/[.06] text-[13px] text-paper/80 transition-colors hover:bg-paper/[.1] hover:text-paper lg:h-16 lg:flex-col lg:gap-1"
+                            >
+                              <TypeIcon type={type} />{name}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     )}
-                    {am ? (
+
+                    {al && am ? (
                       <>
-                        <div className="-mx-gut mt-3 flex gap-2 overflow-x-auto px-gut [scrollbar-width:none] lg:mx-0 lg:flex-wrap lg:px-0 [&::-webkit-scrollbar]:hidden">
-                          <button className={chip(overlay)} onClick={() => setOverlay((o) => !o)}>Overlay</button>
-                          <button className={chip(am.invert)} onClick={() => updMask((m) => ({ invert: !m.invert }))}>Invert</button>
-                          <button className={`${chip(false)} disabled:opacity-30`} disabled={masks.length >= MAX_MASKS} onClick={dupMask}>Duplicate</button>
-                          <button className={chip(false)} onClick={delMask}>Delete</button>
-                        </div>
+                        <Section title={al.name}>
+                          <div className="-mx-gut flex gap-2 overflow-x-auto px-gut [scrollbar-width:none] lg:mx-0 lg:flex-wrap lg:px-0 [&::-webkit-scrollbar]:hidden">
+                            <button className={chip(overlay)} onClick={() => setOverlay((o) => !o)}>Overlay</button>
+                            <button className={chip(false)} disabled={li === 0} onClick={() => moveLayer(-1)} aria-label="Move layer up">↑</button>
+                            <button className={chip(false)} disabled={li === layers.length - 1} onClick={() => moveLayer(1)} aria-label="Move layer down">↓</button>
+                            <button className={`${chip(false)} disabled:opacity-30`} disabled={layers.length >= MAX_LAYERS || nComps + al.comps.length > MAX_COMPS} onClick={dupLayer}>Duplicate</button>
+                            <button className={chip(false)} onClick={delLayer}>Delete layer</button>
+                          </div>
+                          <Field name="Layer amount" value={al.amount} def={100} unit="%" onChange={(val) => updLayer({ amount: val })} />
+                        </Section>
+
+                        <Section title="Masks in this layer">
+                          <div className="-mx-gut flex gap-2 overflow-x-auto px-gut [scrollbar-width:none] lg:mx-0 lg:flex-wrap lg:px-0 [&::-webkit-scrollbar]:hidden">
+                            {al.comps.map((c2, j) => (
+                              <button key={c2.id} className={chip(j === ci)} onClick={() => { setCi(j); setPicking(false) }}>
+                                <span className="opacity-60">{j === 0 ? '' : OP_UI[c2.op][0]}</span>{typeName(c2.type)}{c2.invert ? ' (inv)' : ''}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="mt-2 grid grid-cols-3 gap-2">
+                            {['add', 'subtract', 'intersect'].map((op) => (
+                              <button
+                                key={op} disabled={nComps >= MAX_COMPS}
+                                className={`h-9 rounded-full text-[13px] transition-colors disabled:opacity-30 ${adding && !adding.fresh && adding.op === op ? 'bg-paper text-ink' : 'bg-paper/[.07] text-paper/75 hover:bg-paper/[.12] hover:text-paper'}`}
+                                onClick={() => setAdding((a2) => (a2 && !a2.fresh && a2.op === op ? null : { op, fresh: false }))}
+                              >{OP_UI[op][0]} {OP_UI[op][1]}</button>
+                            ))}
+                          </div>
+                          <div className="mt-3 flex gap-2">
+                            <button className={chip(am.invert)} onClick={() => updMask((m) => ({ invert: !m.invert }))}>Invert</button>
+                            {ci > 0 && (
+                              <div className="flex rounded-full bg-paper/[.07] p-0.5">
+                                {['add', 'subtract', 'intersect'].map((op) => (
+                                  <button key={op} title={OP_UI[op][1]} className={`h-7 rounded-full px-2.5 text-[13px] ${am.op === op ? 'bg-paper text-ink' : 'text-paper/70'}`} onClick={() => updMask({ op })}>{OP_UI[op][0]}</button>
+                                ))}
+                              </div>
+                            )}
+                            <button className={`${chip(false)} ml-auto`} onClick={delMask}>Remove</button>
+                          </div>
+                        </Section>
 
                         {am.type === 'object' && (
                           <Section title="Selection">
@@ -862,6 +1145,43 @@ export default function Lightbox({ photos, index, setIndex }) {
                           </Section>
                         )}
 
+                        {am.type === 'select' && (
+                          <Section title="Selection tools">
+                            <div className="grid grid-cols-5 gap-1.5">
+                              {[['lasso', 'Lasso', 'M7 17c-2.5-1-4-3-4-5.5C3 7.4 7 4 12 4s9 3.4 9 7.5S17 19 12 19c-1.2 0-2.3-.2-3.3-.5M7 17l-1 4 3-2'],
+                                ['rect', 'Rect', 'M4 5h16v14H4z'],
+                                ['ellipse', 'Ellipse', 'M12 5c4.4 0 8 3.1 8 7s-3.6 7-8 7-8-3.1-8-7 3.6-7 8-7z'],
+                                ['wand', 'Wand', 'M4 20L15 9M15 4v2M15 12v2M20 9h-2M12 9h-2M18.5 5.5l-1.4 1.4M18.5 12.5l-1.4-1.4'],
+                                ['brush', 'Brush', 'M14 4l6 6-8.5 8.5a3 3 0 0 1-4.2 0l-1.8-1.8a3 3 0 0 1 0-4.2zM4 20h5']].map(([tool, name, d]) => (
+                                <button
+                                  key={tool} onClick={() => setSel((x) => ({ ...x, tool }))} aria-pressed={sel.tool === tool}
+                                  className={`flex h-14 flex-col items-center justify-center gap-1 rounded-xl text-[11px] transition-colors ${sel.tool === tool ? 'bg-paper text-ink' : 'bg-paper/[.06] text-paper/75 hover:bg-paper/[.1] hover:text-paper'}`}
+                                ><Icon d={d} className="size-[18px]" />{name}</button>
+                              ))}
+                            </div>
+                            <Segmented value={sel.mode} options={[['New', 'new'], ['Add', 'add'], ['Subtract', 'subtract']]} onChange={(mode) => setSel((x) => ({ ...x, mode }))} />
+                            {sel.tool === 'brush' ? (
+                              <>
+                                <Field name="Size" value={brush.size} min={10} max={300} def={60} unit="px" onChange={(val) => setBrush((b) => ({ ...b, size: val }))} />
+                                <Field name="Hardness" value={brush.hard} def={50} unit="%" onChange={(val) => setBrush((b) => ({ ...b, hard: val }))} />
+                              </>
+                            ) : (
+                              <Field name="Feather" value={sel.feather} onChange={(val) => setSel((x) => ({ ...x, feather: val }))} />
+                            )}
+                            {sel.tool === 'wand' && (
+                              <>
+                                <Field name="Tolerance" value={sel.tol} def={30} onChange={(val) => setSel((x) => ({ ...x, tol: val }))} />
+                                <button className={`mt-3 ${chip(sel.contiguous)}`} onClick={() => setSel((x) => ({ ...x, contiguous: !x.contiguous }))}>Contiguous</button>
+                              </>
+                            )}
+                            <div className="mt-3 flex gap-2">
+                              <button className={chip(false)} onClick={() => selAll(true)}>Select all</button>
+                              <button className={chip(false)} onClick={() => selAll(false)}>Clear</button>
+                            </div>
+                          </Section>
+                        )}
+
+                        {(am.type === 'radial' || (am.canvas && am.type !== 'select')) && (
                         <Section title={am.canvas ? 'Brush' : 'Shape'}>
                           {am.canvas && (
                             <>
@@ -876,10 +1196,10 @@ export default function Lightbox({ photos, index, setIndex }) {
                               <Field name="Angle" value={am.angle} min={-90} max={90} unit="°" onChange={(val) => updMask({ angle: val })} />
                             </>
                           )}
-                          <Field name="Amount" value={am.amount} def={100} unit="%" onChange={(val) => updMask({ amount: val })} />
                         </Section>
+                        )}
 
-                        {['radial', 'linear', 'brush', 'object'].includes(am.type) && (
+                        {['select', 'radial', 'linear', 'brush', 'object'].includes(am.type) && (
                           <Section title="Refine">
                             <Segmented
                               value={am.range.mode}
@@ -906,12 +1226,12 @@ export default function Lightbox({ photos, index, setIndex }) {
                           </Section>
                         )}
 
-                        <Section title="Adjust this area">
-                          <Sliders controls={MASK_CONTROLS} groups={MASK_GROUPS} values={am.vals} onChange={(k2, val) => updMask((m) => ({ vals: { ...m.vals, [k2]: val } }))} active={mctl} setActive={setMctl} />
+                        <Section title="Adjust this layer">
+                          <Sliders controls={MASK_CONTROLS} groups={MASK_GROUPS} values={al.vals} onChange={(k2, val) => updLayer((L) => ({ vals: { ...L.vals, [k2]: val } }))} active={mctl} setActive={setMctl} />
                         </Section>
                       </>
                     ) : (
-                      !guide && <p className={`mt-4 ${T.muted}`}>Add a mask to edit just part of the photo.</p>
+                      !guide && !adding && <p className={`mt-4 ${T.muted}`}>Create a layer to edit just part of the photo.</p>
                     )}
                   </>
                 )}
@@ -921,21 +1241,29 @@ export default function Lightbox({ photos, index, setIndex }) {
 
           {/* Tool rail: right (desktop) / bottom (mobile) */}
           <div className="relative z-10 flex shrink-0 items-center justify-center gap-1 border-t border-paper/[.08] px-2 pt-2 pb-[max(.75rem,env(safe-area-inset-bottom))] lg:h-auto lg:w-20 lg:flex-col lg:justify-between lg:border-t-0 lg:border-l lg:border-paper/[.06] lg:px-0 lg:py-gut">
-            <SaveButton className="max-lg:hidden" onClick={saveAndDownload} disabled={saveDisabled} saving={saving} />
+            <div className="flex flex-col items-center gap-2 max-lg:hidden">
+              <SaveButton onClick={saveAndDownload} disabled={saveDisabled} saving={saving} />
+              <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />
+            </div>
             <div className="contents lg:flex lg:flex-col lg:items-center lg:gap-1.5">
               <Tool className="hidden lg:flex" label="Zoom in (+)" onClick={() => zoom((z) => z * 1.5)} disabled={cropping || zc >= ZMAX}><Icon d={I.plus} /></Tool>
               <span className="hidden text-center text-xs text-paper/50 tabular-nums lg:block">{Math.round(zc * 100)}%</span>
               <Tool className="hidden lg:flex" label="Zoom out (−)" onClick={() => zoom((z) => z / 1.5)} disabled={cropping || zc <= 1.001}><Icon d={I.minus} /></Tool>
               <Tool className="hidden lg:flex" label="Fit (0)" onClick={fit} disabled={zc <= 1.001}><Icon d={I.fit} /></Tool>
               <span className="hidden h-px w-6 shrink-0 bg-paper/10 lg:my-2 lg:block" />
-              <Tool label="Rotate (R)" short="Rotate" onClick={rotate}><Icon d={I.rotate} /></Tool>
-              <Tool label="Crop (C)" short="Crop" active={cropping} onClick={startCrop}><Icon d={I.crop} /></Tool>
-              <Tool label="Adjust" short="Adjust" active={panel === 'adjust' && !cropping} onClick={() => togglePanel('adjust')}><AdjustIcon /></Tool>
-              <Tool label="Mask" short="Mask" active={masking} onClick={() => togglePanel('mask')}><MaskIcon /></Tool>
-              <span className="hidden h-px w-6 shrink-0 bg-paper/10 lg:my-2 lg:block" />
-              <Tool label="Reset edits" short="Reset" onClick={resetAll} disabled={!edited && masks.length === 0}><Icon d={I.reset} /></Tool>
+              {/* Edit tools (highlighted by the first-visit tip) */}
+              <div className="relative flex items-center gap-1 lg:flex-col lg:gap-1.5" onPointerDownCapture={() => editTip && closeEditTip()}>
+                <Tool label="Rotate (R)" short="Rotate" onClick={rotate}><Icon d={I.rotate} /></Tool>
+                <Tool label="Crop (C)" short="Crop" active={cropping} onClick={startCrop}><Icon d={I.crop} /></Tool>
+                <Tool label="Adjust" short="Adjust" active={panel === 'adjust' && !cropping} onClick={() => togglePanel('adjust')}><AdjustIcon /></Tool>
+                <Tool label="Mask" short="Mask" active={masking} onClick={() => togglePanel('mask')}><MaskIcon /></Tool>
+                <span className="hidden h-px w-6 shrink-0 bg-paper/10 lg:my-2 lg:block" />
+                <Tool label="Undo (⌘Z)" short="Undo" onClick={undo} disabled={!canUndo && !pending.current}><Icon d={I.undo} /></Tool>
+                <Tool label="Reset all" short="Reset all" onClick={resetAll} disabled={!dirty}><Icon d={I.trash} /></Tool>
+                <AnimatePresence>{editTip && <EditTip key="tip" onClose={closeEditTip} />}</AnimatePresence>
+              </div>
             </div>
-            <span className="hidden size-10 lg:block" aria-hidden="true" />
+            <span className="hidden h-[5.5rem] w-10 lg:block" aria-hidden="true" />
           </div>
 
           <AnimatePresence>
@@ -1003,6 +1331,31 @@ function Preview({ before, after, onBack, onDownload }) {
   )
 }
 
+// Coachmark next to the edit tools (shown each time a photo is opened): a pulsing outline around them + a short explanation.
+function EditTip({ onClose }) {
+  return (
+    <>
+      <motion.span
+        aria-hidden="true" className="pointer-events-none absolute -inset-1.5 rounded-2xl border-2 border-paper"
+        initial={{ opacity: 0 }} exit={{ opacity: 0, transition: { duration: 0.2 } }}
+        animate={{ opacity: [0.35, 1, 0.35], transition: { duration: 1.8, repeat: Infinity, ease: 'easeInOut' } }}
+      />
+      <motion.div
+        role="dialog" aria-label="Why is there an editing feature?"
+        className="absolute bottom-full left-1/2 z-40 mb-5 w-[min(19rem,calc(100vw-1.5rem))] -translate-x-1/2 rounded-2xl bg-paper p-4 text-ink shadow-2xl lg:top-1/2 lg:right-full lg:bottom-auto lg:left-auto lg:mr-5 lg:mb-0 lg:-translate-x-0 lg:-translate-y-1/2"
+        initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} transition={{ duration: 0.25 }}
+      >
+        <span aria-hidden="true" className="absolute -bottom-1.5 left-1/2 size-3 -translate-x-1/2 rotate-45 bg-paper lg:top-1/2 lg:-right-1.5 lg:bottom-auto lg:left-auto lg:-translate-x-0 lg:-translate-y-1/2" />
+        <p className="text-[15px] font-medium">Why is there an editing feature?</p>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-ink/70">
+          So you don’t have to edit the photo twice and lower its resolution. Your edits are applied straight to the full-resolution original.
+        </p>
+        <button onClick={onClose} className="mt-3 h-9 rounded-full bg-ink px-4 text-[13px] font-medium text-paper">Got it</button>
+      </motion.div>
+    </>
+  )
+}
+
 function Section({ title, children }) {
   return (
     <section className="mt-5 border-t border-paper/[.07] pt-4">
@@ -1023,7 +1376,7 @@ function Segmented({ value, options, onChange }) {
 }
 
 const GUIDE = [
-  ['Choose a mask', 'Radial for a round area, Linear for a soft edge like a sky, Brush to paint exactly where you want.'],
+  ['Choose a mask', 'Selection to pick an exact area (lasso, rectangle, magic wand), Object to select a thing with AI, Radial or Linear for soft areas, Brush to paint.'],
   ['Shape it on the photo', 'Drag the handles. The red overlay shows what will change.'],
   ['Adjust that area', 'Use the sliders under “Adjust this area”. The rest of the photo stays the same.'],
   ['Refine', 'Invert flips the area. Luminance or Color keeps the change to bright, dark, or one color.'],
@@ -1054,6 +1407,21 @@ function Handle({ x, y, s, cursor, onPointerDown }) {
       <circle cx={x} cy={y} r={16 * s} fill="transparent" />
       <circle cx={x} cy={y} r={6 * s} fill="white" stroke="rgb(0 0 0 / .45)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
     </g>
+  )
+}
+
+function PreviewButton({ busy, ...props }) {
+  return (
+    <button
+      aria-label="Preview edit"
+      className="group relative grid size-10 shrink-0 place-items-center rounded-full bg-paper/[.1] text-paper transition-[background-color,opacity] hover:bg-paper/[.18] disabled:opacity-30"
+      {...props}
+    >
+      <Icon d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" className={`size-[18px] ${busy ? 'animate-pulse' : ''}`}><circle cx="12" cy="12" r="3" /></Icon>
+      <span className="pointer-events-none absolute top-1/2 right-full mr-2 hidden -translate-y-1/2 rounded-md border border-paper/10 bg-[#1a1a1a] px-2 py-1 text-xs whitespace-nowrap text-paper opacity-0 transition-opacity group-hover:opacity-100 lg:block">
+        {busy ? 'Preparing preview…' : 'Preview edit'}
+      </span>
+    </button>
   )
 }
 

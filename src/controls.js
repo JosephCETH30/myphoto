@@ -19,9 +19,14 @@ export const MASK_CONTROLS = [
   ['clarity', 'Clarity', 'Detail'], ['dehaze', 'Dehaze', 'Detail'], ['sharpness', 'Sharpness', 'Detail'],
 ]
 export const MASK_ZERO = Object.fromEntries(MASK_CONTROLS.map(([k]) => [k, 0]))
-export const MAX_MASKS = 4
+export const MAX_LAYERS = 4 // adjustment layers
+export const MAX_COMPS = 8 // masks (components) across all layers
+// How a component combines with the ones before it in its layer.
+export const OPS = { add: 0, subtract: 1, intersect: 2 }
+// Layers → flat component list (the order the shader slots use), each tagged with its layer index.
+export const flatComps = (layers) => layers.flatMap((L, li) => L.comps.map((c) => ({ ...c, li })))
 // Shader mask kinds: 1 radial, 2 linear, 3 painted canvas (brush / AI object), 4 whole photo (refined by a range).
-export const MASK_TYPE = { radial: 1, linear: 2, brush: 3, object: 3, color: 4, luminance: 4 }
+export const MASK_TYPE = { radial: 1, linear: 2, brush: 3, object: 3, select: 3, color: 4, luminance: 4 }
 export const RANGE_MODE = { none: 0, luminance: 1, color: 2 }
 // Same YIQ chroma the shader uses for color-range masks.
 export const toIQ = ([r, g, b]) => [0.596 * r - 0.274 * g - 0.322 * b, 0.211 * r - 0.523 * g + 0.312 * b]

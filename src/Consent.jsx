@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import gsap from 'gsap'
 import { url } from './imgix.js'
+import { IN_APP, openInAppSheet } from './InApp.jsx'
 
 const OWNER = 'Yoseph Rafael'
 // Shown in the policy when set, e.g. 'hello@yosephrafael.com'.
@@ -9,7 +10,8 @@ const CONTACT = ''
 let openModal = () => {}
 // Every download goes through here. fn runs only after the visitor agrees.
 // No fn = read-only policy. photo (optional) shows what is being downloaded.
-export const askDownload = (fn, photo) => openModal(fn, photo)
+// Inside a social app's browser, first suggest opening the page in a real browser.
+export const askDownload = (fn, photo) => (fn && IN_APP ? openInAppSheet(() => openModal(fn, photo)) : openModal(fn, photo))
 
 export const downloadFile = (href) => {
   const a = Object.assign(document.createElement('a'), { href, download: '' })
