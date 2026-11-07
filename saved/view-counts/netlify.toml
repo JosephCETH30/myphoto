@@ -1,0 +1,8 @@
+# Netlify: build the site and deploy the view-counter function with it.
+# Note: drag-and-drop deploys skip functions; deploy with `npx netlify-cli deploy --build --prod` or a Git-connected site.
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[functions]
+  directory = "netlify/functions"
