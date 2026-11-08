@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { WebGLRenderer, Scene, OrthographicCamera, PlaneGeometry, Mesh, ShaderMaterial, TextureLoader, Vector2, Vector4, CanvasTexture, LinearFilter } from 'three'
 import { url } from './imgix.js'
-import { CONTROLS, MAX_LAYERS, MAX_COMPS, MASK_TYPE, RANGE_MODE, OPS, toIQ, flatComps } from './controls.js'
+import { CONTROLS, ALL_KEYS, LOOK_KEYS, HSL_BANDS, MAX_LAYERS, MAX_COMPS, MASK_TYPE, RANGE_MODE, OPS, toIQ, flatComps } from './controls.js'
 
 const vertexShader = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0., 1.); }`
 // Sliders arrive as -1..1. Order: detail (sharpen, clarity) on the source → exposure + white balance in linear
@@ -10,6 +10,7 @@ const fragmentShader = `
 uniform sampler2D uTex; uniform vec2 uTexel, uSize; uniform float uAspect, uBypass;
 uniform float exposure, brightness, contrast, highlights, shadows, whites, blacks;
 uniform float temperature, tint, saturation, vibrance, hue, clarity, sharpness, dehaze, vignette, fade, grain;
+uniform float ${LOOK_KEYS.join(', ')};
 // Layers (≤4) of local adjustments. Each layer's mask = its components (≤8 total) combined in order with
 // add (max) / subtract / intersect. Component geometry is in image coords 0..1, y down.
 // type: 0 none, 1 radial, 2 linear, 3 painted (brush / AI object), 4 whole photo (narrowed by a range).
@@ -51,6 +52,48 @@ void applyC(inout vec4 W, float li, float op, float c){
   vec4 sel = vec4(equal(vec4(li), vec4(0., 1., 2., 3.)));
   vec4 r = op < .5 ? max(W, vec4(c)) : op < 1.5 ? W * (1. - c) : W * c;
   W = mix(W, r, sel);
+}
+vec3 rgb2hsv(vec3 c){
+  vec4 K = vec4(0., -1. / 3., 2. / 3., -1.);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y), e = 1e-10;
+  return vec3(abs(q.z + (q.w - q.y) / (6. * d + e)), d / (q.x + e), q.x);
+}
+vec3 hsv2rgb(vec3 c){
+  vec3 p = abs(fract(c.xxx + vec3(1., 2. / 3., 1. / 3.)) * 6. - 3.);
+  return c.z * mix(vec3(1.), clamp(p - 1., 0., 1.), c.y);
+}
+// Per-color HSL: eight soft hue bands (centers and half-widths as fractions of the hue circle).
+const float BC[8] = float[8](0., .0833, .1667, .3333, .5, .6667, .7778, .8889);
+const float BW[8] = float[8](.111, .0833, .1667, .1667, .1667, .1667, .111, .111);
+vec3 applyHsl(vec3 c){
+  float H[8] = float[8](${HSL_BANDS.map((b) => 'hue' + b).join(', ')});
+  float S[8] = float[8](${HSL_BANDS.map((b) => 'sat' + b).join(', ')});
+  float V[8] = float[8](${HSL_BANDS.map((b) => 'lum' + b).join(', ')});
+  vec3 h = rgb2hsv(clamp(c, 0., 1.));
+  float tot = 0., dh = 0., ds = 0., dl = 0.;
+  for (int i = 0; i < 8; i++) {
+    float t = clamp(1. - abs(fract(h.x - BC[i] + .5) - .5) / BW[i], 0., 1.);
+    t = t * t * (3. - 2. * t);
+    tot += t; dh += t * H[i]; ds += t * S[i]; dl += t * V[i];
+  }
+  if (tot <= 0.) return c;
+  float chroma = smoothstep(0., .25, h.y); // grays have no color to shift
+  h.x = fract(h.x + (dh / tot) * .125 * chroma); // full slider = 45 degrees
+  h.y = clamp(h.y * (1. + ds / tot), 0., 1.);
+  h.z = clamp(h.z * (1. + (dl / tot) * .6 * chroma), 0., 1.);
+  return hsv2rgb(h);
+}
+// Tone curve (S-curve, lifted blacks, rolled-off whites), then shadow/highlight color grading.
+vec3 applyGrade(vec3 c){
+  c = clamp(c, 0., 1.);
+  c = mix(c, c * c * (3. - 2. * c), curve);
+  c = lift * .2 + c * (1. - lift * .2);
+  c *= 1. - roll * .18;
+  float L = luma(c);
+  vec3 sT = vec3(shadowR, shadowG, shadowB), hT = vec3(highR, highG, highB);
+  return c + (sT - luma(sT)) * .4 * (1. - smoothstep(0., .55, L)) + (hT - luma(hT)) * .3 * smoothstep(.45, 1., L);
 }
 void main(){
   vec3 c = texture2D(uTex, vUv).rgb;
@@ -105,6 +148,7 @@ void main(){
   if (pDh > 0.) c = (c - .12 * pDh) / (1. - .12 * pDh);
   else c = mix(c, vec3(.78), -pDh * .35);
 
+  c = applyHsl(c); // before saturation, so per-color brightness also shapes black & white
   L = luma(c);
   float sat = max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
   c = mix(vec3(L), c, (1. + pSa + max(pDh, 0.) * .25) * (1. + vibrance * (1. - sat)));
@@ -117,6 +161,7 @@ void main(){
     c = toRgb * q;
   }
 
+  c = applyGrade(c);
   c = mix(c, c * .82 + .1, fade); // lifted blacks, softer whites
   float vf = smoothstep(.25, .85, length(vUv - .5) * 1.414);
   c = vignette < 0. ? c * (1. + vignette * vf) : mix(c, vec3(1.), vignette * vf * .8);
@@ -145,7 +190,7 @@ export default function AdjustCanvas({ src, values, before, layers = [], show = 
     const eight = (f) => Array.from({ length: MAX_COMPS }, f)
     const u = {
       uTex: { value: null }, uBypass: { value: 0 }, uTexel: { value: new Vector2() }, uSize: { value: new Vector2() }, uAspect: { value: 1 },
-      ...Object.fromEntries(CONTROLS.map(([k]) => [k, { value: 0 }])),
+      ...Object.fromEntries(ALL_KEYS.map((k) => [k, { value: 0 }])),
       uCT: { value: eight(() => 0) }, uCL: { value: eight(() => 0) },
       uCG: { value: eight(() => new Vector4()) }, uCO: { value: eight(() => new Vector4()) }, uCR: { value: eight(() => new Vector4()) },
       ...Object.fromEntries(eight((_, k) => [`uC${k}`, { value: null }])),
@@ -164,7 +209,7 @@ export default function AdjustCanvas({ src, values, before, layers = [], show = 
 
     api.current = {
       set(vals, bypass) {
-        for (const [k] of CONTROLS) u[k].value = vals[k] / 100
+        for (const k of ALL_KEYS) u[k].value = vals[k] / 100
         u.uBypass.value = bypass ? 1 : 0
         schedule()
       },
@@ -233,6 +278,26 @@ export default function AdjustCanvas({ src, values, before, layers = [], show = 
         cv.getContext('2d').drawImage(tex.image, 0, 0, cv.width, cv.height)
         return cv
       },
+      // Small JPEG previews of slider sets on this photo (global sliders only: no masks, overlay or bypass).
+      thumbs(list, maxSide = 220) {
+        if (!tex) return []
+        const saved = ALL_KEYS.map((k) => u[k].value), bypass = u.uBypass.value, showing = u.uShow.value, amt = u.uLAmt.value.clone()
+        u.uBypass.value = 0; u.uShow.value = -1; u.uLAmt.value.set(0, 0, 0, 0)
+        const s = maxSide / Math.max(tw, th)
+        renderer.setSize(Math.max(1, Math.round(tw * s)), Math.max(1, Math.round(th * s)), false)
+        const urls = list.map((vals) => {
+          for (const k of ALL_KEYS) u[k].value = (vals[k] || 0) / 100
+          draw()
+          return canvas.toDataURL('image/jpeg', 0.8) // must read in the same task as the render
+        })
+        ALL_KEYS.forEach((k, i) => { u[k].value = saved[i] })
+        u.uBypass.value = bypass; u.uShow.value = showing; u.uLAmt.value.copy(amt)
+        renderer.setSize(pw, ph, false)
+        draw()
+        return urls
+      },
+      // Instant before/after: flip the shader's bypass without touching React state.
+      setBypass(on) { u.uBypass.value = on ? 1 : 0; draw() },
       // A brush stroke changed mask i's canvas: re-upload it (at most once per frame).
       refreshMask(i) {
         const t = u['uC' + i]?.value
@@ -245,13 +310,16 @@ export default function AdjustCanvas({ src, values, before, layers = [], show = 
         renderer.setSize(pw, ph, false)
         draw()
       },
-      // Full-size render copied to a 2D canvas (must read in the same task as the render).
-      snapshot() {
+      // Render copied to a 2D canvas (must read in the same task as the render).
+      // Full size for downloads; maxSide (longest edge, px) for quick previews.
+      snapshot(maxSide = Infinity) {
         const bypass = u.uBypass.value, showing = u.uShow.value
         u.uBypass.value = 0; u.uShow.value = -1 // export without the red overlay
-        renderer.setSize(tw, th, false)
+        const s = Math.min(1, maxSide / Math.max(tw, th))
+        const sw = Math.max(1, Math.round(tw * s)), sh = Math.max(1, Math.round(th * s))
+        renderer.setSize(sw, sh, false)
         draw()
-        const out = Object.assign(document.createElement('canvas'), { width: tw, height: th })
+        const out = Object.assign(document.createElement('canvas'), { width: sw, height: sh })
         out.getContext('2d').drawImage(canvas, 0, 0)
         u.uBypass.value = bypass; u.uShow.value = showing
         renderer.setSize(pw, ph, false)

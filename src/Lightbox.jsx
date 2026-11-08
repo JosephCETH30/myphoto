@@ -3,8 +3,10 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { url, srcSet, downloadUrl, imgFallback } from './imgix.js'
 import Magnet from './Magnet.jsx'
 import { askDownload, downloadFile } from './Consent.jsx'
-import { CONTROLS, GROUPS, ZERO, MASK_CONTROLS, MASK_GROUPS, MASK_ZERO, MAX_LAYERS, MAX_COMPS, flatComps } from './controls.js'
+import { CONTROLS, ALL_KEYS, GROUPS, ZERO, MASK_CONTROLS, MASK_GROUPS, MASK_ZERO, MAX_LAYERS, MAX_COMPS, flatComps } from './controls.js'
 import Slider from './Slider.jsx'
+import { PRESET_CATEGORIES, PRESET_COUNT } from './presets.js'
+import { isEditUnlocked, unlockEdit } from './editLock.js'
 
 const AdjustCanvas = lazy(() => import('./Editor.jsx'))
 
@@ -86,6 +88,8 @@ const HINTS = {
   sel_ellipse: 'Drag to select an ellipse',
   sel_wand: 'Tap an area to select similar colors',
   sel_brush: 'Paint the selection by hand',
+  sel_pen: 'Click to add points · drag to curve · click the first point to close',
+  sel_pen_closed: 'Drag points or handles to adjust · Enter to apply',
   busy: 'Selecting object…',
   luminance: 'Affects bright or dark tones across the photo',
   colorDone: 'Changes only this color · adjust Range to widen it',
@@ -101,6 +105,7 @@ const downloadBlob = (blob, name) => {
   setTimeout(() => URL.revokeObjectURL(link.href), 2000)
 }
 const typeName = (t) => TYPES.find(([k]) => k === t)[1]
+const scalePreset = (pv, amount) => Object.fromEntries(ALL_KEYS.map((k) => [k, Math.round(((pv[k] || 0) * amount) / 100)]))
 const fmt = (v, min = -100) => (v > 0 && min < 0 ? '+' : '') + v
 
 // ---- look
@@ -149,7 +154,7 @@ function Tool({ label, short, tip = 'left', active, className = '', children, ..
   return (
     <button
       aria-label={label} aria-pressed={active}
-      className={`group relative flex shrink-0 flex-col items-center justify-center gap-1 rounded-xl transition-colors disabled:pointer-events-none disabled:opacity-30 max-lg:min-w-14 max-lg:py-1 lg:size-10 ${active ? 'text-paper lg:bg-paper/[.12]' : 'text-paper/60 hover:text-paper lg:hover:bg-paper/[.07]'} ${className}`}
+      className={`group relative flex shrink-0 flex-col items-center justify-center gap-1 rounded-xl transition-colors disabled:pointer-events-none disabled:opacity-30 max-lg:min-w-12 max-lg:py-1 lg:size-10 ${active ? 'text-paper lg:bg-paper/[.12]' : 'text-paper/60 hover:text-paper lg:hover:bg-paper/[.07]'} ${className}`}
       {...props}
     >
       {children}
@@ -241,6 +246,11 @@ export default function Lightbox({ photos, index, setIndex }) {
   const [vals, setVals] = useState(ZERO)
   const [before, setBefore] = useState(false)
   const [ctl, setCtl] = useState('exposure')
+  const [preset, setPreset] = useState(null) // last applied: { id, vals, amount }
+  const [pcat, setPcat] = useState(PRESET_CATEGORIES[0].name)
+  const [thumbs, setThumbs] = useState({}) // preset id → preview of this photo
+  const [unlocked, setUnlocked] = useState(isEditUnlocked)
+  const [askPass, setAskPass] = useState(false)
   const [layers, setLayers] = useState([])
   const [li, setLi] = useState(-1) // selected layer
   const [ci, setCi] = useState(0) // selected component in that layer
@@ -251,6 +261,8 @@ export default function Lightbox({ photos, index, setIndex }) {
   // Selection tools (for "Selection" masks): tool, how a new selection combines, feather, magic-wand settings.
   const [sel, setSel] = useState({ tool: 'lasso', mode: 'add', feather: 0, tol: 30, contiguous: true })
   const [selDraft, setSelDraft] = useState(null) // shape being drawn: { tool, a, b, pts }
+  // Pen path (image coords 0..1): anchors with a mirrored bezier handle (hx, hy) each.
+  const [pen, setPen] = useState(null) // null | { pts: [{ x, y, hx, hy }], closed }
   const [picking, setPicking] = useState(false) // false | 'color' (eyedropper) | 'object' (AI tap)
   const [segBusy, setSegBusy] = useState(false)
   const [preview, setPreview] = useState(null) // { before, after, blob } object URLs of the final render
@@ -267,7 +279,7 @@ export default function Lightbox({ photos, index, setIndex }) {
 
   // New photo = fresh start.
   useEffect(() => {
-    setNat(null); setR(0); setCrop(null); setDraft(null); setVals(ZERO); setGlReady(false); setLoadErr(false); setLayers([]); setLi(-1); setCi(0); setAdding(null); setPicking(false); layerNo.current = 0
+    setNat(null); setR(0); setCrop(null); setDraft(null); setVals(ZERO); setThumbs({}); setGlReady(false); setLoadErr(false); setLayers([]); setLi(-1); setCi(0); setAdding(null); setPicking(false); layerNo.current = 0
     v.current = { z: 1, x: 0, y: 0 }; setZc(1)
   }, [p.src])
 
@@ -279,8 +291,20 @@ export default function Lightbox({ photos, index, setIndex }) {
   }, [])
 
   const maskEdited = layers.some((L) => L.visible && L.amount > 0 && MASK_CONTROLS.some(([k]) => L.vals[k] !== 0))
-  const adjusted = CONTROLS.some(([k]) => vals[k] !== 0) || maskEdited
-  const useGl = adjusted || panel === 'adjust' || panel === 'mask'
+  const adjusted = ALL_KEYS.some((k) => vals[k] !== 0) || maskEdited
+  const useGl = adjusted || panel === 'adjust' || panel === 'mask' || panel === 'presets'
+  const presetScaled = preset && scalePreset(preset.vals, preset.amount)
+  const activePreset = preset && ALL_KEYS.every((k) => vals[k] === presetScaled[k]) ? preset : null // manual slider moves or undo end it
+  const presetItems = PRESET_CATEGORIES.find((x) => x.name === pcat).items
+  const noGlobal = ALL_KEYS.every((k) => vals[k] === 0)
+  useEffect(() => {
+    if (panel !== 'presets' || !glReady) return
+    const missing = [{ id: 'original', vals: {} }, ...presetItems].filter((x) => !thumbs[x.id])
+    if (!missing.length || !glApi.current) return
+    const urls = glApi.current.thumbs(missing.map((x) => x.vals))
+    if (!urls.length) return
+    setThumbs((t) => ({ ...t, ...Object.fromEntries(missing.map((x, i) => [x.id, urls[i]])) }))
+  }, [panel, glReady, pcat, thumbs]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (!useGl) setGlReady(false) }, [useGl])
   const cropping = !!draft
   const masking = panel === 'mask' && !cropping
@@ -406,10 +430,10 @@ export default function Lightbox({ photos, index, setIndex }) {
   }
 
   useEffect(() => {
-    if (!nat || tipSeen.current) return
+    if (!nat || !unlocked || tipSeen.current) return
     const t2 = setTimeout(() => setEditTip(true), 700)
     return () => clearTimeout(t2)
-  }, [nat])
+  }, [nat, unlocked])
 
   // ---- layers + mask components
   const updLayer = (patch) => setLayers((ls) => ls.map((L, i) => (i === li ? { ...L, ...(typeof patch === 'function' ? patch(L) : patch) } : L)))
@@ -541,6 +565,7 @@ export default function Lightbox({ photos, index, setIndex }) {
     if (!D) return
     const [x, y] = toImg(e)
     if (D.mode === 'paint') return stroke(x, y)
+    if (D.mode.startsWith('pen')) return penDrag(D, x, y)
     if (D.mode === 'sel') {
       const L = D.pts[D.pts.length - 1]
       if (D.tool === 'lasso' && Math.hypot(x - L[0], y - L[1]) > 0.002) D.pts.push([x, y])
@@ -632,10 +657,60 @@ export default function Lightbox({ photos, index, setIndex }) {
       g.putImageData(id, 0, 0)
     })
   }
+  // ---- pen: click = corner point, click-drag = curve, first point closes, points/handles stay draggable
+  const penPathTo = (g, pts, closed, W, H) => {
+    g.moveTo(pts[0].x * W, pts[0].y * H)
+    const seg = (a, b) => g.bezierCurveTo((a.x + a.hx) * W, (a.y + a.hy) * H, (b.x - b.hx) * W, (b.y - b.hy) * H, b.x * W, b.y * H)
+    for (let i = 1; i < pts.length; i++) seg(pts[i - 1], pts[i])
+    if (closed) seg(pts[pts.length - 1], pts[0])
+  }
+  const penD = (P) => {
+    if (!P?.pts.length) return ''
+    const W = nat.w, H = nat.h, f = (x, y) => `${x * W} ${y * H}`
+    let d = `M${f(P.pts[0].x, P.pts[0].y)}`
+    const seg = (a, b) => { d += `C${f(a.x + a.hx, a.y + a.hy)} ${f(b.x - b.hx, b.y - b.hy)} ${f(b.x, b.y)}` }
+    for (let i = 1; i < P.pts.length; i++) seg(P.pts[i - 1], P.pts[i])
+    if (P.closed) { seg(P.pts[P.pts.length - 1], P.pts[0]); d += 'Z' }
+    return d
+  }
+  const penDown = (x, y) => {
+    const P = pen || { pts: [], closed: false }
+    const W = nat.w, H = nat.h, r = 12 / screenPerImg() // hit radius in image px
+    const near = (px, py) => Math.hypot((x - px) * W, (y - py) * H) < r
+    const hi = P.pts.findIndex((a) => (a.hx || a.hy) && (near(a.x + a.hx, a.y + a.hy) || near(a.x - a.hx, a.y - a.hy)))
+    if (hi >= 0) { md.current = { mode: 'penHandle', i: hi, flip: !near(P.pts[hi].x + P.pts[hi].hx, P.pts[hi].y + P.pts[hi].hy) }; return }
+    const ai = P.pts.findIndex((a) => near(a.x, a.y))
+    if (ai === 0 && !P.closed && P.pts.length >= 3) { setPen({ ...P, closed: true }); return }
+    if (ai >= 0) { md.current = { mode: 'penMove', i: ai, sx: x, sy: y, a: { ...P.pts[ai] } }; return }
+    if (P.closed) return
+    setPen({ ...P, pts: [...P.pts, { x, y, hx: 0, hy: 0 }] })
+    md.current = { mode: 'penNew', i: P.pts.length, sx: x, sy: y }
+  }
+  const penDrag = (D, x, y) => setPen((P) => {
+    if (!P) return P
+    const pts = P.pts.map((a, i) => {
+      if (i !== D.i) return a
+      if (D.mode === 'penMove') return { ...a, x: D.a.x + x - D.sx, y: D.a.y + y - D.sy }
+      if (D.mode === 'penNew') return { ...a, hx: x - a.x, hy: y - a.y }
+      const s2 = D.flip ? -1 : 1 // dragging the mirrored handle
+      return { ...a, hx: s2 * (x - a.x), hy: s2 * (y - a.y) }
+    })
+    return { ...P, pts }
+  })
+  const penApply = () => {
+    if (!pen || pen.pts.length < 3) return
+    const P = pen
+    commitSel((g, W, H) => { g.beginPath(); penPathTo(g, P.pts, true, W, H); g.closePath(); g.fill() })
+    setPen(null)
+  }
+  const penUndoPoint = () => setPen((P) => (!P ? P : P.closed ? { ...P, closed: false } : P.pts.length > 1 ? { ...P, pts: P.pts.slice(0, -1) } : null))
+  useEffect(() => { setPen(null) }, [sel.tool, am?.id])
+
   const selStart = (e) => {
     e.stopPropagation()
     capture(e.currentTarget, e)
     const [x, y] = toImg(e)
+    if (sel.tool === 'pen') return penDown(x, y)
     if (sel.tool === 'wand') return wand(clamp(x, 0, 1), clamp(y, 0, 1))
     if (sel.tool === 'brush') { md.current = { mode: 'paint', last: null }; return dab(x, y) }
     md.current = { mode: 'sel', tool: sel.tool, a: [x, y], b: [x, y], pts: [[x, y]] }
@@ -650,15 +725,19 @@ export default function Lightbox({ photos, index, setIndex }) {
 
   // ---- render the final JPEG: (adjusted snapshot or full-res original) → rotate → crop.
   // withEdits=false gives the matching "before" (same rotation + crop, no adjustments).
-  const origImg = useRef(null)
-  useEffect(() => { origImg.current = null }, [p.src])
-  const render = async (withEdits) => {
+  // maxSide: longest edge for quick previews (screen-sized); Infinity = full resolution for downloads.
+  const origImg = useRef({})
+  useEffect(() => { origImg.current = {} }, [p.src])
+  const render = async (withEdits, maxSide = Infinity) => {
     let src
-    if (withEdits && adjusted && glApi.current) src = glApi.current.snapshot()
+    if (withEdits && adjusted && glApi.current) src = glApi.current.snapshot(maxSide)
+    else if (maxSide < Infinity && glApi.current?.imageCanvas) src = glApi.current.imageCanvas(maxSide) // already loaded: no fetch
     else {
-      origImg.current ??= loadImg(url(p.src, { fit: 'max', w: 8192, h: 8192, q: 95 }))
-      src = await origImg.current
+      const w = maxSide < Infinity ? maxSide : 8192
+      origImg.current[w] ??= loadImg(url(p.src, { fit: 'max', w, h: w, q: 95 }))
+      src = await origImg.current[w]
     }
+    if (!src) throw new Error('image not ready')
     const W0 = src.naturalWidth || src.width, H0 = src.naturalHeight || src.height
     const RW0 = side ? H0 : W0, RH0 = side ? W0 : H0
     const cc = crop || FULL
@@ -672,16 +751,19 @@ export default function Lightbox({ photos, index, setIndex }) {
     g.translate(-cc.x * RW0 + RW0 / 2, -cc.y * RH0 + RH0 / 2)
     g.rotate((rot * Math.PI) / 180)
     g.drawImage(src, -W0 / 2, -H0 / 2)
-    const blob = await new Promise((res) => out.toBlob(res, 'image/jpeg', 0.95))
+    const blob = await new Promise((res) => out.toBlob(res, 'image/jpeg', maxSide < Infinity ? 0.9 : 0.95))
     if (!blob) throw new Error('render failed')
     return blob
   }
+  const previewSize = () => Math.min(2560, Math.ceil(Math.max(innerWidth, innerHeight) * Math.min(devicePixelRatio || 1, 2)))
   const editedName = p.src.split('/').pop().replace(/\.\w+$/, '') + '-edited.jpg'
   const openPreview = async () => {
     setBuilding(true)
     try {
-      const after = await render(true), beforeBlob = await render(false)
-      setPreview({ after: URL.createObjectURL(after), before: URL.createObjectURL(beforeBlob), blob: after })
+      // Screen-sized renders: instant even after heavy edits. Downloads still render full resolution.
+      const size = previewSize()
+      const [after, beforeBlob] = await Promise.all([render(true, size), render(false, size)])
+      setPreview({ after: URL.createObjectURL(after), before: URL.createObjectURL(beforeBlob) })
     } catch (err) {
       console.error('preview render failed', err)
       alert('Could not prepare the preview. Try another browser.')
@@ -804,7 +886,15 @@ export default function Lightbox({ photos, index, setIndex }) {
     const key = (e) => {
       if (e.key !== 'Escape' && !e.metaKey && !e.ctrlKey && e.target.closest?.('input, [role=slider]')) return // sliders keep their arrow keys; Esc / ⌘Z always work
       const k2 = e.key, z1 = v.current.z <= 1.001
+      if (askPass) { if (k2 === 'Escape') setAskPass(false); return }
       if (preview) { if (k2 === 'Escape') closePreview(); return }
+      if (pen && (k2 === 'Escape' || k2 === 'Enter' || k2 === 'Backspace')) {
+        e.preventDefault()
+        if (k2 === 'Escape') setPen(null)
+        else if (k2 === 'Enter') penApply()
+        else penUndoPoint()
+        return
+      }
       if (k2 === 'Escape') picking ? setPicking(false) : cropping ? setDraft(null) : panel ? setPanel(null) : close()
       else if (k2 === 'Enter' && cropping) applyCrop()
       else if (k2 === 'ArrowRight' && z1) go(1)
@@ -812,6 +902,7 @@ export default function Lightbox({ photos, index, setIndex }) {
       else if ((k2 === '+' || k2 === '=') && !cropping) zoom((z) => z * 1.5)
       else if (k2 === '-' && !cropping) zoom((z) => z / 1.5)
       else if (k2 === '0') fit()
+      else if (!unlocked) return
       else if (k2 === 'r' || k2 === 'R') rotate()
       else if ((e.metaKey || e.ctrlKey) && (k2 === 'z' || k2 === 'Z')) { e.preventDefault(); undo() }
       else if (k2 === 'c' || k2 === 'C') startCrop()
@@ -853,7 +944,7 @@ export default function Lightbox({ photos, index, setIndex }) {
               <Tool className="hidden lg:flex" label="Next" tip="right" onClick={() => go(1)} disabled={n < 2 || cropping}><Icon d={I.next} /></Tool>
             </div>
             <div className="flex gap-2 lg:hidden">
-              <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />
+              {unlocked && <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />}
               <SaveButton onClick={saveAndDownload} disabled={saveDisabled} saving={saving} />
             </div>
           </nav>
@@ -866,7 +957,7 @@ export default function Lightbox({ photos, index, setIndex }) {
           >
             {masking && am && (
               <p className="pointer-events-none absolute top-3 left-1/2 z-10 max-w-[90%] -translate-x-1/2 truncate rounded-full bg-ink/75 px-3.5 py-1.5 text-[12px] text-paper/90">
-                {HINTS[segBusy ? 'busy' : picking === 'object' ? 'pickObject' : picking ? 'color' : am.type === 'select' ? `sel_${sel.tool}` : am.canvas && brush.erase ? 'erase' : am.type === 'color' ? 'colorDone' : am.type]}
+                {HINTS[segBusy ? 'busy' : picking === 'object' ? 'pickObject' : picking ? 'color' : am.type === 'select' ? (sel.tool === 'pen' && pen?.closed ? 'sel_pen_closed' : `sel_${sel.tool}`) : am.canvas && brush.erase ? 'erase' : am.type === 'color' ? 'colorDone' : am.type]}
               </p>
             )}
             {loadErr && !nat && (
@@ -911,6 +1002,27 @@ export default function Lightbox({ photos, index, setIndex }) {
                           {!picking && !segBusy && am.canvas && (
                             <>
                               <rect width={nat.w} height={nat.h} fill="transparent" className="pointer-events-auto" onPointerDown={am.type === 'select' ? selStart : grabMask('paint')} />
+                              {am.type === 'select' && sel.tool === 'pen' && pen && (
+                                <g className="pointer-events-none">
+                                  <path d={penD(pen)} fill={pen.closed ? 'rgb(255 255 255 / .14)' : 'none'} stroke="white" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+                                  {pen.pts.map((a, i) => (
+                                    <g key={i}>
+                                      {(a.hx || a.hy) ? (
+                                        <>
+                                          <line x1={(a.x - a.hx) * nat.w} y1={(a.y - a.hy) * nat.h} x2={(a.x + a.hx) * nat.w} y2={(a.y + a.hy) * nat.h} stroke="white" strokeOpacity=".6" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+                                          <circle cx={(a.x + a.hx) * nat.w} cy={(a.y + a.hy) * nat.h} r={4 * hs} fill="white" />
+                                          <circle cx={(a.x - a.hx) * nat.w} cy={(a.y - a.hy) * nat.h} r={4 * hs} fill="white" />
+                                        </>
+                                      ) : null}
+                                      <rect
+                                        x={a.x * nat.w - (i === 0 && !pen.closed && pen.pts.length >= 3 ? 7 : 5) * hs} y={a.y * nat.h - (i === 0 && !pen.closed && pen.pts.length >= 3 ? 7 : 5) * hs}
+                                        width={(i === 0 && !pen.closed && pen.pts.length >= 3 ? 14 : 10) * hs} height={(i === 0 && !pen.closed && pen.pts.length >= 3 ? 14 : 10) * hs}
+                                        fill={i === 0 && !pen.closed && pen.pts.length >= 3 ? '#e10600' : 'white'} stroke="black" strokeOpacity=".5" strokeWidth="1" vectorEffect="non-scaling-stroke"
+                                      />
+                                    </g>
+                                  ))}
+                                </g>
+                              )}
                               {selDraft && (() => {
                                 const W = nat.w, H = nat.h, [x0, y0] = selDraft.a, [x1, y1] = selDraft.b
                                 const look = { fill: 'rgb(255 255 255 / .12)', stroke: 'white', strokeWidth: 1.5, strokeDasharray: '6 4', vectorEffect: 'non-scaling-stroke', className: 'pointer-events-none' }
@@ -1003,17 +1115,41 @@ export default function Lightbox({ photos, index, setIndex }) {
                       <button className={btn(true)} onClick={applyCrop}>Apply</button>
                     </div>
                   </>
+                ) : panel === 'presets' ? (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <p className={T.title}>Presets</p>
+                      <span className={T.muted}>{PRESET_COUNT}</span>
+                    </div>
+                    <div className="-mx-gut mt-3 flex gap-2 overflow-x-auto px-gut [scrollbar-width:none] lg:mx-0 lg:flex-wrap lg:px-0 [&::-webkit-scrollbar]:hidden">
+                      {PRESET_CATEGORIES.map((x) => <button key={x.name} className={chip(pcat === x.name)} onClick={() => setPcat(x.name)}>{x.name}</button>)}
+                    </div>
+                    <div className="-mx-gut mt-3 flex gap-2 overflow-x-auto px-gut pt-1 pb-1 [scrollbar-width:none] lg:mx-0 lg:grid lg:grid-cols-3 lg:overflow-visible lg:px-0 [&::-webkit-scrollbar]:hidden">
+                      <PresetTile label="Original" thumb={thumbs.original} rot={rot} active={noGlobal} onClick={() => { setPreset(null); setVals(ZERO) }} />
+                      {presetItems.map((x) => (
+                        <PresetTile
+                          key={x.id} label={x.label} thumb={thumbs[x.id]} rot={rot} active={activePreset?.id === x.id}
+                          onClick={() => { setPreset({ id: x.id, vals: x.vals, amount: 100 }); setVals(scalePreset(x.vals, 100)) }}
+                        />
+                      ))}
+                    </div>
+                    {activePreset && (
+                      <Field name="Amount" value={activePreset.amount} def={100} unit="%" onChange={(val) => { setPreset({ ...activePreset, amount: val }); setVals(scalePreset(activePreset.vals, val)) }} />
+                    )}
+                    {!glReady && <p className={`mt-2 ${T.muted}`}>Loading full resolution…</p>}
+                  </>
                 ) : panel === 'adjust' ? (
                   <>
                     <div className="mb-3 flex items-center justify-between">
                       <p className={T.title}>Adjust</p>
                       <div className="flex gap-1">
                         <button
-                          className={`${chip(before)} select-none`}
-                          onPointerDown={() => setBefore(true)} onPointerUp={() => setBefore(false)} onPointerLeave={() => setBefore(false)}
+                          className={`${chip(false)} select-none active:bg-paper active:text-ink`}
+                          onPointerDown={() => glApi.current?.setBypass(true)} onPointerUp={() => glApi.current?.setBypass(false)}
+                          onPointerLeave={() => glApi.current?.setBypass(false)} onPointerCancel={() => glApi.current?.setBypass(false)}
                           onContextMenu={(e) => e.preventDefault()}
                         >Before</button>
-                        <button className={`${chip(false)} disabled:opacity-30`} disabled={!CONTROLS.some(([k2]) => vals[k2] !== 0)} onClick={() => setVals(ZERO)}>Reset</button>
+                        <button className={`${chip(false)} disabled:opacity-30`} disabled={noGlobal} onClick={() => setVals(ZERO)}>Reset</button>
                       </div>
                     </div>
                     <Sliders controls={CONTROLS} groups={GROUPS} values={vals} onChange={(k2, val) => setVals((x) => ({ ...x, [k2]: val }))} active={ctl} setActive={setCtl} />
@@ -1147,19 +1283,30 @@ export default function Lightbox({ photos, index, setIndex }) {
 
                         {am.type === 'select' && (
                           <Section title="Selection tools">
-                            <div className="grid grid-cols-5 gap-1.5">
-                              {[['lasso', 'Lasso', 'M7 17c-2.5-1-4-3-4-5.5C3 7.4 7 4 12 4s9 3.4 9 7.5S17 19 12 19c-1.2 0-2.3-.2-3.3-.5M7 17l-1 4 3-2'],
+                            <div className="grid grid-cols-3 gap-1.5">
+                              {[['pen', 'Pen', 'M12 19l7-7 3 3-7 7zM18 13l-1.5-7.5L2 2l3.5 14.5L13 18zM2 2l7.6 7.6M11 11a2 2 0 1 0 0-.01'],
+                                ['lasso', 'Lasso', 'M7 17c-2.5-1-4-3-4-5.5C3 7.4 7 4 12 4s9 3.4 9 7.5S17 19 12 19c-1.2 0-2.3-.2-3.3-.5M7 17l-1 4 3-2'],
                                 ['rect', 'Rect', 'M4 5h16v14H4z'],
                                 ['ellipse', 'Ellipse', 'M12 5c4.4 0 8 3.1 8 7s-3.6 7-8 7-8-3.1-8-7 3.6-7 8-7z'],
                                 ['wand', 'Wand', 'M4 20L15 9M15 4v2M15 12v2M20 9h-2M12 9h-2M18.5 5.5l-1.4 1.4M18.5 12.5l-1.4-1.4'],
                                 ['brush', 'Brush', 'M14 4l6 6-8.5 8.5a3 3 0 0 1-4.2 0l-1.8-1.8a3 3 0 0 1 0-4.2zM4 20h5']].map(([tool, name, d]) => (
                                 <button
                                   key={tool} onClick={() => setSel((x) => ({ ...x, tool }))} aria-pressed={sel.tool === tool}
-                                  className={`flex h-14 flex-col items-center justify-center gap-1 rounded-xl text-[11px] transition-colors ${sel.tool === tool ? 'bg-paper text-ink' : 'bg-paper/[.06] text-paper/75 hover:bg-paper/[.1] hover:text-paper'}`}
+                                  className={`flex h-12 flex-col items-center justify-center gap-1 rounded-xl text-[11px] transition-colors ${sel.tool === tool ? 'bg-paper text-ink' : 'bg-paper/[.06] text-paper/75 hover:bg-paper/[.1] hover:text-paper'}`}
                                 ><Icon d={d} className="size-[18px]" />{name}</button>
                               ))}
                             </div>
                             <Segmented value={sel.mode} options={[['New', 'new'], ['Add', 'add'], ['Subtract', 'subtract']]} onChange={(mode) => setSel((x) => ({ ...x, mode }))} />
+                            {sel.tool === 'pen' && (
+                              <div className="mt-3 rounded-xl bg-paper/[.04] p-3">
+                                <p className={T.muted}>{!pen ? 'Click on the photo to start a path.' : pen.closed ? 'Path closed. Adjust points, then apply.' : `${pen.pts.length} point${pen.pts.length === 1 ? '' : 's'} · click the red point to close`}</p>
+                                <div className="mt-2 grid grid-cols-3 gap-2">
+                                  <button className={`${chip(false)} justify-center disabled:opacity-30`} disabled={!pen} onClick={penUndoPoint}>Undo point</button>
+                                  <button className={`${chip(false)} justify-center disabled:opacity-30`} disabled={!pen} onClick={() => setPen(null)}>Cancel</button>
+                                  <button className={`${chip(true)} justify-center disabled:opacity-30`} disabled={!pen || pen.pts.length < 3} onClick={penApply}>Apply</button>
+                                </div>
+                              </div>
+                            )}
                             {sel.tool === 'brush' ? (
                               <>
                                 <Field name="Size" value={brush.size} min={10} max={300} def={60} unit="px" onChange={(val) => setBrush((b) => ({ ...b, size: val }))} />
@@ -1243,7 +1390,7 @@ export default function Lightbox({ photos, index, setIndex }) {
           <div className="relative z-10 flex shrink-0 items-center justify-center gap-1 border-t border-paper/[.08] px-2 pt-2 pb-[max(.75rem,env(safe-area-inset-bottom))] lg:h-auto lg:w-20 lg:flex-col lg:justify-between lg:border-t-0 lg:border-l lg:border-paper/[.06] lg:px-0 lg:py-gut">
             <div className="flex flex-col items-center gap-2 max-lg:hidden">
               <SaveButton onClick={saveAndDownload} disabled={saveDisabled} saving={saving} />
-              <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />
+              {unlocked && <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />}
             </div>
             <div className="contents lg:flex lg:flex-col lg:items-center lg:gap-1.5">
               <Tool className="hidden lg:flex" label="Zoom in (+)" onClick={() => zoom((z) => z * 1.5)} disabled={cropping || zc >= ZMAX}><Icon d={I.plus} /></Tool>
@@ -1252,25 +1399,34 @@ export default function Lightbox({ photos, index, setIndex }) {
               <Tool className="hidden lg:flex" label="Fit (0)" onClick={fit} disabled={zc <= 1.001}><Icon d={I.fit} /></Tool>
               <span className="hidden h-px w-6 shrink-0 bg-paper/10 lg:my-2 lg:block" />
               {/* Edit tools (highlighted by the first-visit tip) */}
+              {!unlocked ? (
+                <Tool label="Edit (password)" short="Edit" onClick={() => setAskPass(true)}><Icon d="M6 11h12v9H6zM8.5 11V7.5a3.5 3.5 0 0 1 7 0V11" /></Tool>
+              ) : (
               <div className="relative flex items-center gap-1 lg:flex-col lg:gap-1.5" onPointerDownCapture={() => editTip && closeEditTip()}>
                 <Tool label="Rotate (R)" short="Rotate" onClick={rotate}><Icon d={I.rotate} /></Tool>
                 <Tool label="Crop (C)" short="Crop" active={cropping} onClick={startCrop}><Icon d={I.crop} /></Tool>
+                <Tool label="Presets" short="Presets" active={panel === 'presets' && !cropping} onClick={() => togglePanel('presets')}><Icon d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" /></Tool>
                 <Tool label="Adjust" short="Adjust" active={panel === 'adjust' && !cropping} onClick={() => togglePanel('adjust')}><AdjustIcon /></Tool>
                 <Tool label="Mask" short="Mask" active={masking} onClick={() => togglePanel('mask')}><MaskIcon /></Tool>
                 <span className="hidden h-px w-6 shrink-0 bg-paper/10 lg:my-2 lg:block" />
                 <Tool label="Undo (⌘Z)" short="Undo" onClick={undo} disabled={!canUndo && !pending.current}><Icon d={I.undo} /></Tool>
-                <Tool label="Reset all" short="Reset all" onClick={resetAll} disabled={!dirty}><Icon d={I.trash} /></Tool>
+                <Tool label="Reset all" short="Reset" onClick={resetAll} disabled={!dirty}><Icon d={I.trash} /></Tool>
                 <AnimatePresence>{editTip && <EditTip key="tip" onClose={closeEditTip} />}</AnimatePresence>
               </div>
+              )}
             </div>
             <span className="hidden h-[5.5rem] w-10 lg:block" aria-hidden="true" />
           </div>
 
           <AnimatePresence>
+            {askPass && <PassGate key="pass" onClose={() => setAskPass(false)} onOk={() => { setUnlocked(true); setAskPass(false) }} />}
+          </AnimatePresence>
+
+          <AnimatePresence>
             {preview && (
               <Preview
                 key="preview" before={preview.before} after={preview.after} onBack={closePreview}
-                onDownload={() => askDownload(() => downloadBlob(preview.blob, editedName), { ...p, edited: true })}
+                onDownload={() => askDownload(downloadEdited, { ...p, edited: true })}
               />
             )}
           </AnimatePresence>
@@ -1407,6 +1563,51 @@ function Handle({ x, y, s, cursor, onPointerDown }) {
       <circle cx={x} cy={y} r={16 * s} fill="transparent" />
       <circle cx={x} cy={y} r={6 * s} fill="white" stroke="rgb(0 0 0 / .45)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
     </g>
+  )
+}
+
+function PresetTile({ label, thumb, rot, active, onClick }) {
+  return (
+    <button onClick={onClick} aria-pressed={active} className="w-[4.75rem] shrink-0 text-left lg:w-auto">
+      <span className={`block aspect-square overflow-hidden rounded-lg bg-paper/[.06] ring-2 ring-offset-2 ring-offset-[#0b0b0b] transition-shadow ${active ? 'ring-paper' : 'ring-transparent'}`}>
+        {thumb && <img src={thumb} alt="" draggable={false} className="size-full object-cover" style={{ transform: `rotate(${rot}deg)` }} />}
+      </span>
+      <span className={`mt-1.5 block truncate text-[11px] ${active ? 'text-paper' : 'text-paper/60'}`}>{label}</span>
+    </button>
+  )
+}
+
+function PassGate({ onClose, onOk }) {
+  const [pw, setPw] = useState('')
+  const [state, setState] = useState('idle') // idle | busy | wrong
+  const submit = async (e) => {
+    e.preventDefault()
+    if (!pw || state === 'busy') return
+    setState('busy')
+    const ok = await unlockEdit(pw).catch(() => false)
+    if (ok) onOk()
+    else setState('wrong')
+  }
+  return (
+    <motion.div
+      className="absolute inset-0 z-40 grid place-items-center bg-ink/85 p-6" role="dialog" aria-modal="true" aria-label="Unlock editing"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <form onSubmit={submit} className="w-full max-w-sm rounded-3xl border border-paper/10 bg-[#0b0b0b] p-6">
+        <p className="text-lg font-medium text-paper">Editing is locked</p>
+        <input
+          type="password" autoFocus autoComplete="current-password" aria-label="Password" placeholder="Password" value={pw}
+          onChange={(e) => { setPw(e.target.value); setState('idle') }}
+          className="mt-4 h-12 w-full rounded-full bg-paper/[.08] px-5 text-[15px] text-paper outline-none placeholder:text-paper/40 focus:bg-paper/[.12]"
+        />
+        <p className="mt-2 h-5 text-[13px] text-accent" role="alert">{state === 'wrong' ? 'Wrong password' : ''}</p>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button type="button" className={btn(false)} onClick={onClose}>Cancel</button>
+          <button className={btn(true)} disabled={state === 'busy'}>{state === 'busy' ? 'Checking…' : 'Unlock'}</button>
+        </div>
+      </form>
+    </motion.div>
   )
 }
 

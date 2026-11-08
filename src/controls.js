@@ -8,7 +8,14 @@ export const CONTROLS = [
   ['clarity', 'Clarity', 'Detail'], ['sharpness', 'Sharpness', 'Detail'], ['dehaze', 'Dehaze', 'Detail'],
   ['vignette', 'Vignette', 'Effects'], ['fade', 'Fade', 'Effects', 0], ['grain', 'Grain', 'Effects', 0],
 ]
-export const ZERO = Object.fromEntries(CONTROLS.map(([k]) => [k, 0]))
+// Look engine, set by presets only (no sliders): per-color HSL, color grading, tone curve. -100..100, 0 = neutral.
+export const HSL_BANDS = ['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta']
+export const LOOK_KEYS = [
+  ...['hue', 'sat', 'lum'].flatMap((x) => HSL_BANDS.map((b) => x + b)),
+  'shadowR', 'shadowG', 'shadowB', 'highR', 'highG', 'highB', 'curve', 'lift', 'roll',
+]
+export const ALL_KEYS = [...CONTROLS.map(([k]) => k), ...LOOK_KEYS]
+export const ZERO = Object.fromEntries(ALL_KEYS.map((k) => [k, 0]))
 
 // Local (masked) adjustments: [key, label, group]. The shader packs them as 3 vec4s (see Editor.jsx).
 export const MASK_GROUPS = ['Light', 'Color', 'Detail']
