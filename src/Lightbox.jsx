@@ -6,7 +6,6 @@ import { askDownload, downloadFile } from './Consent.jsx'
 import { CONTROLS, ALL_KEYS, GROUPS, ZERO, MASK_CONTROLS, MASK_GROUPS, MASK_ZERO, MAX_LAYERS, MAX_COMPS, flatComps } from './controls.js'
 import Slider from './Slider.jsx'
 import { PRESET_CATEGORIES, PRESET_COUNT } from './presets.js'
-import { isEditUnlocked, unlockEdit } from './editLock.js'
 
 const AdjustCanvas = lazy(() => import('./Editor.jsx'))
 
@@ -249,8 +248,6 @@ export default function Lightbox({ photos, index, setIndex }) {
   const [preset, setPreset] = useState(null) // last applied: { id, vals, amount }
   const [pcat, setPcat] = useState(PRESET_CATEGORIES[0].name)
   const [thumbs, setThumbs] = useState({}) // preset id → preview of this photo
-  const [unlocked, setUnlocked] = useState(isEditUnlocked)
-  const [askPass, setAskPass] = useState(false)
   const [layers, setLayers] = useState([])
   const [li, setLi] = useState(-1) // selected layer
   const [ci, setCi] = useState(0) // selected component in that layer
@@ -430,10 +427,10 @@ export default function Lightbox({ photos, index, setIndex }) {
   }
 
   useEffect(() => {
-    if (!nat || !unlocked || tipSeen.current) return
+    if (!nat || tipSeen.current) return
     const t2 = setTimeout(() => setEditTip(true), 700)
     return () => clearTimeout(t2)
-  }, [nat, unlocked])
+  }, [nat])
 
   // ---- layers + mask components
   const updLayer = (patch) => setLayers((ls) => ls.map((L, i) => (i === li ? { ...L, ...(typeof patch === 'function' ? patch(L) : patch) } : L)))
@@ -886,7 +883,6 @@ export default function Lightbox({ photos, index, setIndex }) {
     const key = (e) => {
       if (e.key !== 'Escape' && !e.metaKey && !e.ctrlKey && e.target.closest?.('input, [role=slider]')) return // sliders keep their arrow keys; Esc / ⌘Z always work
       const k2 = e.key, z1 = v.current.z <= 1.001
-      if (askPass) { if (k2 === 'Escape') setAskPass(false); return }
       if (preview) { if (k2 === 'Escape') closePreview(); return }
       if (pen && (k2 === 'Escape' || k2 === 'Enter' || k2 === 'Backspace')) {
         e.preventDefault()
@@ -902,7 +898,6 @@ export default function Lightbox({ photos, index, setIndex }) {
       else if ((k2 === '+' || k2 === '=') && !cropping) zoom((z) => z * 1.5)
       else if (k2 === '-' && !cropping) zoom((z) => z / 1.5)
       else if (k2 === '0') fit()
-      else if (!unlocked) return
       else if (k2 === 'r' || k2 === 'R') rotate()
       else if ((e.metaKey || e.ctrlKey) && (k2 === 'z' || k2 === 'Z')) { e.preventDefault(); undo() }
       else if (k2 === 'c' || k2 === 'C') startCrop()
@@ -944,7 +939,7 @@ export default function Lightbox({ photos, index, setIndex }) {
               <Tool className="hidden lg:flex" label="Next" tip="right" onClick={() => go(1)} disabled={n < 2 || cropping}><Icon d={I.next} /></Tool>
             </div>
             <div className="flex gap-2 lg:hidden">
-              {unlocked && <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />}
+              <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />
               <SaveButton onClick={saveAndDownload} disabled={saveDisabled} saving={saving} />
             </div>
           </nav>
@@ -1390,7 +1385,7 @@ export default function Lightbox({ photos, index, setIndex }) {
           <div className="relative z-10 flex shrink-0 items-center justify-center gap-1 border-t border-paper/[.08] px-2 pt-2 pb-[max(.75rem,env(safe-area-inset-bottom))] lg:h-auto lg:w-20 lg:flex-col lg:justify-between lg:border-t-0 lg:border-l lg:border-paper/[.06] lg:px-0 lg:py-gut">
             <div className="flex flex-col items-center gap-2 max-lg:hidden">
               <SaveButton onClick={saveAndDownload} disabled={saveDisabled} saving={saving} />
-              {unlocked && <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />}
+              <PreviewButton onClick={openPreview} disabled={previewDisabled} busy={building && !preview} />
             </div>
             <div className="contents lg:flex lg:flex-col lg:items-center lg:gap-1.5">
               <Tool className="hidden lg:flex" label="Zoom in (+)" onClick={() => zoom((z) => z * 1.5)} disabled={cropping || zc >= ZMAX}><Icon d={I.plus} /></Tool>
@@ -1399,9 +1394,6 @@ export default function Lightbox({ photos, index, setIndex }) {
               <Tool className="hidden lg:flex" label="Fit (0)" onClick={fit} disabled={zc <= 1.001}><Icon d={I.fit} /></Tool>
               <span className="hidden h-px w-6 shrink-0 bg-paper/10 lg:my-2 lg:block" />
               {/* Edit tools (highlighted by the first-visit tip) */}
-              {!unlocked ? (
-                <Tool label="Edit (password)" short="Edit" onClick={() => setAskPass(true)}><Icon d="M6 11h12v9H6zM8.5 11V7.5a3.5 3.5 0 0 1 7 0V11" /></Tool>
-              ) : (
               <div className="relative flex items-center gap-1 lg:flex-col lg:gap-1.5" onPointerDownCapture={() => editTip && closeEditTip()}>
                 <Tool label="Rotate (R)" short="Rotate" onClick={rotate}><Icon d={I.rotate} /></Tool>
                 <Tool label="Crop (C)" short="Crop" active={cropping} onClick={startCrop}><Icon d={I.crop} /></Tool>
@@ -1413,14 +1405,9 @@ export default function Lightbox({ photos, index, setIndex }) {
                 <Tool label="Reset all" short="Reset" onClick={resetAll} disabled={!dirty}><Icon d={I.trash} /></Tool>
                 <AnimatePresence>{editTip && <EditTip key="tip" onClose={closeEditTip} />}</AnimatePresence>
               </div>
-              )}
             </div>
             <span className="hidden h-[5.5rem] w-10 lg:block" aria-hidden="true" />
           </div>
-
-          <AnimatePresence>
-            {askPass && <PassGate key="pass" onClose={() => setAskPass(false)} onOk={() => { setUnlocked(true); setAskPass(false) }} />}
-          </AnimatePresence>
 
           <AnimatePresence>
             {preview && (
@@ -1574,40 +1561,6 @@ function PresetTile({ label, thumb, rot, active, onClick }) {
       </span>
       <span className={`mt-1.5 block truncate text-[11px] ${active ? 'text-paper' : 'text-paper/60'}`}>{label}</span>
     </button>
-  )
-}
-
-function PassGate({ onClose, onOk }) {
-  const [pw, setPw] = useState('')
-  const [state, setState] = useState('idle') // idle | busy | wrong
-  const submit = async (e) => {
-    e.preventDefault()
-    if (!pw || state === 'busy') return
-    setState('busy')
-    const ok = await unlockEdit(pw).catch(() => false)
-    if (ok) onOk()
-    else setState('wrong')
-  }
-  return (
-    <motion.div
-      className="absolute inset-0 z-40 grid place-items-center bg-ink/85 p-6" role="dialog" aria-modal="true" aria-label="Unlock editing"
-      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <form onSubmit={submit} className="w-full max-w-sm rounded-3xl border border-paper/10 bg-[#0b0b0b] p-6">
-        <p className="text-lg font-medium text-paper">Editing is locked</p>
-        <input
-          type="password" autoFocus autoComplete="current-password" aria-label="Password" placeholder="Password" value={pw}
-          onChange={(e) => { setPw(e.target.value); setState('idle') }}
-          className="mt-4 h-12 w-full rounded-full bg-paper/[.08] px-5 text-[15px] text-paper outline-none placeholder:text-paper/40 focus:bg-paper/[.12]"
-        />
-        <p className="mt-2 h-5 text-[13px] text-accent" role="alert">{state === 'wrong' ? 'Wrong password' : ''}</p>
-        <div className="mt-2 grid grid-cols-2 gap-2">
-          <button type="button" className={btn(false)} onClick={onClose}>Cancel</button>
-          <button className={btn(true)} disabled={state === 'busy'}>{state === 'busy' ? 'Checking…' : 'Unlock'}</button>
-        </div>
-      </form>
-    </motion.div>
   )
 }
 
